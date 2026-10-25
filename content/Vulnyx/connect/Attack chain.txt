@@ -1,0 +1,30 @@
+nmap发现windows目标
+
+web html源码发现LFI特征
+
+goubuster fuzz  对 page.php?section=FUZZ 进行模糊测试 （大写过滤，用全小写绕过）
+
+发现管理员的powershell 历史记录文件  ，查看里面的内容
+
+发现 mremoteng连接管理工具  ， LFI读取配置文件
+
+工具解密配置文件，  拿到管理员密码
+
+
+
+
+信息收集：Nmap 发现 Windows 目标及开放服务。
+
+漏洞发现：Web 源码审计发现 LFI 特征（page.php?section=）。
+
+WAF/过滤绕过：使用全小写绕过大小写过滤，Gobuster 模糊测试确认 LFI 可用。
+
+敏感文件读取：利用 LFI 读取管理员 PowerShell 历史记录（ConsoleHost_history.txt）。
+
+凭据发现：从历史记录中发现 mRemoteNG
+
+配置窃取：利用 LFI 读取 mRemoteNG 配置文件（confCons.xml）。
+
+离线解密：使用解密工具提取明文管理员密码。
+
+权限获取：使用解密出的凭据通过 WinRM (5985) 登录目标，获取管理员权限。

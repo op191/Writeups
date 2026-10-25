@@ -1,0 +1,28 @@
+
+
+sql数据库问题需要手动下载sql数据库安装包，然后手动命令安装用脚本放在目录的sql_conf.ini配置文件安装
+
+安装程序
+https://download.microsoft.com/download/7/c/1/7c14e92e-bdcb-4f89-b7cf-93543e7112d1/SQLEXPR_x64_ENU.exe
+
+自动配置sql命令
+C:\setup\mssql\media\setup.exe /configurationfile=C:\setup\mssql\sql_conf.ini /IACCEPTSQLSERVERLICENSETERMS /QUIET
+
+srv02机器
+ evil-winrm-py -i 192.168.56.22 -u 'NORTH\Administrator' -p 'NgtI75cKV+Pu'
+
+
+ Start-Process "c:\setup\SSMS_installer.exe" -ArgumentList '/in
+stall','/quiet','/norestart' -Wait
+
+
+
+$ProgressPreference='SilentlyContinue'
+Invoke-WebRequest -UseBasicParsing -Uri "https://aka.ms/ssmsfullsetup" -OutFile C:\setup\mssql\SSMS-Setup-ENU.exe
+(Get-Item C:\setup\mssql\SSMS-Setup-ENU.exe).Length
+
+
+#安装ssms会卡死,从脚本删掉安装ssms
+grep -n -A5 "\[mssql_ssms\]" ad/GOAD/data/inventory
+sed -i '/\[mssql_ssms\]/,/^\[/{/^srv02$/d}' ad/GOAD/data/inventory
+grep -n -A5 "\[mssql_ssms\]" ad/GOAD/data/inventory

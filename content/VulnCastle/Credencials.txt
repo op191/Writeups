@@ -1,0 +1,40 @@
+=== DMZ Network (attacker-accessible) ===
+  Web Portal  : http://localhost:8080
+  Webmail     : http://localhost:8025
+  SSH Gateway : ssh -p 2222 sysadmin@localhost (pass: admin123)
+
+=== Internal Network (pivot required) ===
+  API Server  : app-01    (10.10.0.13:3000)
+  Database    : db-01     (10.10.0.14:3306)
+  File Share  : file-01   (10.10.0.15:445)
+  Admin Panel : admin-01  (10.10.0.16:8080)
+
+
+  DB credentials for dev environment:
+  Host: db-01.internal
+  User: app_user
+  Pass: S3cretDB!2024
+
+
+=== Samba FileShare ===
+  Target : file-01.internal
+  User   : smbadmin
+  Pass   : FileShare#2024
+  Note   : Read/write access to all shares
+
+=== Redis Cache ===
+  Target : admin-01.internal:6379
+  Auth   : none (no authentication required)
+  Note   : Unauthenticated access
+
+=== Backup SSH ===
+  Target : vpn-gw-01.internal
+  User   : backup
+  Pass   : backup
+  Note   : Used for automated backups
+
+=== Admin Panel ===
+  Target : http://admin-01.internal:8080
+  User   : administrator
+  Pass   : Admin!Panel99
+  Note   : Web admin interface

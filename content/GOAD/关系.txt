@@ -1,0 +1,66 @@
+SMB         192.168.56.22   445    CASTELBLACK      [*] Windows 10 / Server 2019 Build 17763 x64 (name:CASTELBLACK) (domain:north.sevenkingdoms.local) (signing:False) (SMBv1:False)
+SMB         192.168.56.23   445    BRAAVOS          [*] Windows Server 2016 Standard Evaluation 14393 x64 (name:BRAAVOS) (domain:essos.local) (signing:False) (SMBv1:True)
+SMB         192.168.56.12   445    MEEREEN          [*] Windows Server 2016 Standard Evaluation 14393 x64 (name:MEEREEN) (domain:essos.local) (signing:True) (SMBv1:True) (Null Auth:True) (DC:True)
+SMB         192.168.56.10   445    KINGSLANDING     [*] Windows 10 / Server 2019 Build 17763 x64 (name:KINGSLANDING) (domain:sevenkingdoms.local) (signing:True) (SMBv1:False) (Null Auth:True) (DC:True)
+SMB         192.168.56.11   445    WINTERFELL       [*] Windows 10 / Server 2019 Build 17763 x64 (name:WINTERFELL) (domain:north.sevenkingdoms.local) (signing:True) (SMBv1:False) (Null Auth:True) (DC:True)
+
+
+192.168.56.11(WINTERFELL)凭据
+
+krbtgt ba747c503e457513dce39ed7c3316816
+
+user:      samwell.tarly
+
+password:  Heartsbane
+
+
+user: jeor.mormont
+
+password: _L0ngCl@w_
+
+
+根域
+
+joffrey.baratheon  3b60abbc25770511334b3829866b08f1
+
+外部用户： daenerys.targaryen   34534854d33b398b66684072224bb47a
+
+north.sevenkingdoms.local\sql_svc:YouWillNotKerboroast1ngMeeeeee
+
+
+  CASTELBLACK      [+] north.sevenkingdoms.local\robb.stark:831486ac7f26860c9e2f51ac91e1a07a
+
+ NORTH\sql_svc 84a5092f53390ea48d660be52b93b804
+
+ north.sevenkingdoms.local\sql_svc:YouWillNotKerboroast1ngMeeeeee
+
+
+ WINTERFELL       [+] north.sevenkingdoms.local\robb.stark:831486ac7f26860c9e2f51ac91e1a07a (Pwn3d!)
+
+
+ eddard.stark  d977b98c6c9282c5c478be1d97b237b8
+
+
+ 根域 sevenkingdoms.local SID S-1-5-21-163276420-1103195522-780370152
+
+
+.11   u:  brandon.stark      p: iseedeadpeople
+
+    jon.snow           iknownothing
+
+
+    Successfully added 'FAKE$' with password 'Password123!'
+
+ 192.168.56.23
+ relayuser$   +V2i^T4L!N_NAD+   在计算机账户的RBCD属性里
+
+
+ 192.168.56.23
+
+ Administrator  84fe45d7c3263065e931761aef6c7aaf  本地认证
+
+192.168.56.12
+
+hacker : @Vco}jGQe)K@JpU  域管
+
+Administrator    54296a48cd30259cc88095373cec24da

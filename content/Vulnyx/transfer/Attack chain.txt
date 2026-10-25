@@ -1,0 +1,24 @@
+web 响应头cookie字段的base32编码  解码后为域名
+
+vhost枚举 先用curl发送个任意错误请求加 wc 看响应长度，
+
+goubuster vhost 爆破 --exclude-length 过滤上面发现的长度
+
+虚拟主机网站发现命令注入框 测试报错，发现是个curl在后面工具，直接下载攻击机的反弹木马 再用注入框访问触发
+
+ss -tulpn 发现本地有个web服务 访问后发现 /目录下没有资源
+
+ps aux  发现这个本地web服务进程是root运行的 和 web根目录映射在所有人可写的/dev/shm下
+
+写反弹木马的/dev/shm目录，访问发现没有触发，用curl -v  发现被当成文本了
+
+写木马查看phpinfo（）信息 看disable_function字段，发现很多命令执行函数被禁用
+
+
+LD_PRELOAD+mail()提权 因为putenv()和mail()没被禁
+
+
+简短：
+
+    Cookie解码探Vhost ➡️ 命令注入拿Shell ➡️ 发现Root本地服务与可写目录 ➡️ phpinfo查禁用函数 ➡️ LD_PRELOAD劫持+mail()绕过提权 ➡️ 拿下Root
+

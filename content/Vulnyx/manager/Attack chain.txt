@@ -1,0 +1,38 @@
+snmp 爆破 发现 口令
+
+登录上snmp参看信息 发现 用户和密码hash  域名（management.nyx）web目录映射shares目录
+pass-the-hash + socat 绕过smbclient.py端口限制访问目标4445的smb shares 写反弹shell木马到目录
+
+单纯访问木马不触发php执行，  想到 换个虚拟主机来访问，因为nginx配置可能只给了那个 vhost  上php解释器
+
+gobuster爆破vhost 发现全是同一个响应，把真实存在的dev.management.nyx都过滤掉了，换路
+
+写脚本 curl 改 HOST头 批量访问 http://目标/木马.php 触发反弹shell
+
+ligolo内网穿透  240.0.0.1 魔法网段 正向代理 访问目标的 127.0.0.10000 webmin服务
+
+发现 /etc/webmin/miniser.users 文件所有用户有 rw 权限 ，里面有着 (corw:x:1000)
+
+尝试将生成的密码hash放入 x 占位符号
+
+登录webmin网页成功，但是低权限
+
+尝试 /etc/webmin/miniser.users 添加字段 root:自己生成密码hash:1234 （冒充root）
+
+用root 用户登录 webmin 成功
+
+webmin面板的终端弹root的shell回来，成功提权root
+
+
+
+简短：
+
+1.SNMP 泄露：爆破出 weak string（如 crowley），snmpwalk 拿到明文账号 crow 及 哈希 和web目录和shares目录映射
+
+2.SMB 破局：用 socat 做本地端口转发绕过 4445 限制，PtH（哈希传递）登录 RESOURCE 共享，写入 PHP 反弹 Shell。
+
+3.VHost 盲打：Nginx 限制 PHP 解析，gobuster 误杀同大小响应。用 curl -H "Host: xxx" 脚本盲扫，成功触发并拿到 crow 的 Shell。
+
+4.魔法正向代理：通过 Ligolo 的 240.0.0.1 魔法网段路由，突破 127.0.0.1 限制，直接访问 Webmin 后台。
+
+5.Webmin 越权伪造：发现 /etc/webmin/miniser.users 可写。直接在文件内伪造 root:自生成哈希:ID，成功用假 root 登录后台，在面板终端拿下 root 权限。
