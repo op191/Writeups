@@ -1,0 +1,102 @@
+name: Release
+
+# Versioning with changesets (see .changeset/README.md):
+# 1. While .changeset/*.md files are pending on v5, keep a "chore: release Quartz" PR open that
+#    bumps package.json and writes CHANGELOG.md.
+# 2. When that PR is merged (no pending changesets left), tag the commit vX.Y.Z and publish a
+#    GitHub release with the CHANGELOG section. Quartz is not published to npm.
+
+on:
+  push:
+    branches:
+      - v5
+  workflow_dispatch:
+
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+
+jobs:
+  release:
+    if: ${{ github.repository == 'jackyzha0/quartz' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write # start the Docker build for the new tag
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - run: npm install
+
+      - name: Create or update the release PR
+        id: changesets
+        uses: changesets/action@v2
+        with:
+          version-script: npm run version-packages
+          pr-title: "chore: release Quartz"
+          commit-message: "chore: release Quartz"
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tag and publish the GitHub release
+        if: steps.changesets.outputs.has-changesets == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Each step can be re-run: an existing tag on this commit, or an existing release, is
+        # kept, and the Docker build is started again (a failed run used to stop at "already
+        # exists" on the next attempt).
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="v$VERSION"
+          # The commit the tag points at on GitHub (empty when there is no tag yet); an annotated
+          # tag is followed to its commit.
+          tag_commit() {
+            local ref type sha
+            ref=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq '.object.type + " " + .object.sha' 2>/dev/null) || return 0
+            read -r type sha <<<"$ref"
+            if [ "$type" = "tag" ]; then
+              sha=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$sha" --jq '.object.sha')
+            fi
+            echo "$sha"
+          }
+          EXISTING=$(tag_commit)
+          if [ -n "$EXISTING" ] && [ "$EXISTING" != "$GITHUB_SHA" ]; then
+            if git merge-base --is-ancestor "$EXISTING" "$GITHUB_SHA" 2>/dev/null; then
+              echo "$TAG was released at $EXISTING — nothing to release."
+              exit 0
+            fi
+            echo "::error::$TAG already exists but points at $EXISTING, which is not this commit ($GITHUB_SHA) or one of its ancestors. Check the tag (delete it if it is wrong), then re-run this workflow."
+            exit 1
+          fi
+          # Only versions produced by `changeset version` are released (guards against tagging
+          # an arbitrary commit with a version that was never released through this workflow).
+          awk -v v="## $VERSION" '$0 == v {found=1; next} found && /^## / {exit} found' CHANGELOG.md > release-notes.md || true
+          if [ ! -s release-notes.md ]; then
+            echo "CHANGELOG.md has no section for $VERSION — not tagging."
+            exit 0
+          fi
+          # The tag is a lightweight ref straight to the merged release commit, created here
+          # before the release. GitHub signs the commits it merges, so the tag shows as verified.
+          # Letting `gh release create` make the tag instead gives an unsigned annotated tag
+          # object (tagger: whoever merged the release PR), which GitHub marks "Unverified"
+          # (jackyzha0/quartz#2455). `git describe --tags` reads lightweight tags as well.
+          if [ -z "$EXISTING" ]; then
+            gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA" >/dev/null
+          else
+            echo "$TAG already points at this commit — keeping it."
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "The $TAG release already exists — keeping it."
+          else
+            gh release create "$TAG" --verify-tag --title "Quartz $VERSION" --notes-file release-notes.md
+          fi
+          # A tag created with GITHUB_TOKEN doesn't trigger `on: push: tags`, so the Docker workflow
+          # never built the versioned images; start it for the tag explicitly. Started with
+          # `--ref vX.Y.Z`, the run's GITHUB_REF is refs/tags/vX.Y.Z, which is all
+          # docker/metadata-action's `type=semver` tags need (it checks the ref, not the event).
+          gh workflow run docker-build-push.yaml --ref "$TAG"

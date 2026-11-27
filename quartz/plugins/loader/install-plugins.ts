@@ -4,8 +4,11 @@ import path from "path"
 import YAML from "yaml"
 import { installPlugins, parsePluginSource, regeneratePluginIndex } from "./gitLoader.js"
 import type { PluginSource, QuartzPluginsJson } from "./types.js"
+import { absorbingBuiltin } from "../builtins/index.js"
+import { resolveExtends } from "./config-extends.js"
 
 function resolveConfigPath(): string {
+  if (process.env.QUARTZ_CONFIG_PATH) return path.resolve(process.env.QUARTZ_CONFIG_PATH)
   const configYamlPath = path.join(process.cwd(), "quartz.config.yaml")
   const defaultConfigYamlPath = path.join(process.cwd(), "quartz.config.default.yaml")
   const legacyPluginsJsonPath = path.join(process.cwd(), "quartz.plugins.json")
@@ -18,18 +21,22 @@ function resolveConfigPath(): string {
   return configYamlPath
 }
 
-function readPluginsJson(): QuartzPluginsJson | null {
+async function readPluginsJson(): Promise<QuartzPluginsJson | null> {
   const configPath = resolveConfigPath()
   if (!fs.existsSync(configPath)) return null
   const raw = fs.readFileSync(configPath, "utf-8")
-  if (configPath.endsWith(".yaml") || configPath.endsWith(".yml")) {
-    return YAML.parse(raw)
-  }
-  return JSON.parse(raw)
+  const data =
+    configPath.endsWith(".yaml") || configPath.endsWith(".yml") ? YAML.parse(raw) : JSON.parse(raw)
+  return data && typeof data === "object" && "extends" in data
+    ? resolveExtends(data, configPath)
+    : data
 }
 
 async function getExternalPluginSources(): Promise<PluginSource[]> {
   try {
+    // Loading quartz.ts runs the full config loader; its warnings are printed again by the build
+    // that follows (prebuild → build), so keep this pass quiet.
+    process.env.QUARTZ_CONFIG_QUIET = "1"
     const module = await import("../../../quartz.js")
     const config = module.default ?? module
     const externalPlugins = config.externalPlugins
@@ -40,13 +47,16 @@ async function getExternalPluginSources(): Promise<PluginSource[]> {
     // fall back to config yaml parsing
   }
 
-  const pluginsJson = readPluginsJson()
+  const pluginsJson = await readPluginsJson()
   const entries = pluginsJson?.plugins ?? []
   return entries.filter((entry) => entry.enabled !== false).map((entry) => entry.source)
 }
 
 async function main() {
-  const externalPlugins = await getExternalPluginSources()
+  // Official plugins that are built into core now (crawl-links, …) are never installed.
+  const externalPlugins = (await getExternalPluginSources()).filter(
+    (source) => !absorbingBuiltin({ source, enabled: true }),
+  )
 
   if (externalPlugins.length === 0) {
     console.log("No external plugins to install.")

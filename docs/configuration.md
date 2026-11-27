@@ -7,17 +7,54 @@ Quartz is meant to be extremely configurable, even if you don't know any coding.
 > [!tip]
 > If you edit `quartz.config.yaml` using a text-editor with YAML language support like VSCode, it will warn you when you've made an error in your configuration, helping you avoid configuration mistakes!
 
-The configuration of Quartz can be broken down into two main parts:
+The configuration of Quartz can be broken down into three parts:
 
 ```yaml title="quartz.config.yaml"
 configuration:
   pageTitle: "My Site"
   # ... general configuration
 plugins:
-  - source: github:quartz-community/some-plugin
+  - source: "@quartz-community/explorer"
     enabled: true
     # ... plugin entries
+layout:
+  # ... groups and per-page-type layout overrides
 ```
+
+`configuration` and `plugins` are described below; the `layout` section (component groups, `byPageType` overrides, sidebar modes) is described in [[layout]].
+
+## Extending the default configuration
+
+Without a `quartz.config.yaml`, Quartz uses `quartz.config.default.yaml`. A `quartz.config.yaml` normally replaces it completely. With `extends`, your file can hold just the changes you make to another configuration instead:
+
+```yaml title="quartz.config.yaml"
+extends: default # quartz.config.default.yaml
+configuration:
+  pageTitle: "My Site"
+  baseUrl: example.com
+plugins:
+  - source: "@quartz-community/graph"
+    enabled: false # turn off a default plugin
+  - source: "@quartz-community/explorer"
+    options:
+      folderDefaultState: open # only this option changes
+  - source: github:me/my-plugin # a plugin the defaults don't have
+    enabled: true
+```
+
+- `extends` is `default`, a path to another config file relative to this one (which may itself extend another), an `https://` URL, or a list of those. An empty file (or one with only comments) is an empty config, and `extends: []` extends nothing.
+- A list stacks presets: each file in it adds its own changes. Quartz puts every file of the `extends` chain in one line and applies each once, its bases before it: the list's entries in order, each after the bases it extends, and your file last. A base that several entries share (usually `default`) is applied once, at its first appearance. So with `extends: [./a.yaml, ./b.yaml]`, where both extend `default`, the order is `default` → `a.yaml` → `b.yaml` → your file: what `a.yaml` changes stays unless `b.yaml` changes the same thing (later entries win), and your file wins over both. An entry that doesn't extend the shared base is applied before it if it comes first, so the base's settings win over it; make such a preset extend `default` too, or list it after the others.
+  - A URL is fetched when the config is loaded (10 s timeout, at most 1 MB) and kept in `.quartz-cache/extends/`. If a later fetch fails (offline, timeout, HTTP error), Quartz uses the cached copy and warns; without one, the build stops. `QUARTZ_EXTENDS_OFFLINE=1` uses only the cached copy. Relative `extends` inside a fetched file are resolved against its URL; `default` always means your local `quartz.config.default.yaml`. Only `https://` URLs are allowed, and only extend configs you trust: they choose which plugins your build runs.
+- `configuration` and `layout` merge key by key, including nested objects (`theme.colors.lightMode.secondary` changes only that colour). Any other value replaces the default: strings, numbers and lists such as `ignorePatterns` or `byPageType.<type>.exclude`. Setting a key to `null` removes it, so the built-in default applies.
+- A plugin entry changes the default entry for the same plugin, matched by name (`github:quartz-community/explorer` matches `@quartz-community/explorer`, and a fork with the same name replaces it). A source with a `name` matches by that name; a source with a `subdir` and no `name` matches by repository and folder, so two plugins of one repository stay separate. `enabled`, `order` and `source` replace the default values. `options` and `layout` merge like `configuration`, and `null` drops them so the plugin's own defaults apply. A plugin that is not in the base is added, and it needs `enabled: true` just as in a full config.
+- Plugins run in `order` as before. Your file can change a default plugin's `order`. Where two plugins have the same order, the base config's list order decides, and added plugins come last.
+- Your updates to `quartz.config.default.yaml` (for example after `npx quartz upgrade`) reach your site without copying them over.
+
+- `npx quartz build --serve` also rebuilds when a local file your config extends changes.
+- `npx quartz plugin` commands and `npx quartz info` read the merged configuration, as the build does: `plugin list`, `status`, `doctor`, `install` and `prune` see the plugins your bases configure. Commands that change plugins only ever write your own file, never the merged result: `enable`, `disable` and `config --set` add or change your entry for the plugin (`- source: …` with just that change), `config --unset` removes your value and, when a base sets the option, sets it to `null` so the plugin's default applies, and `add` appends a full entry. `remove` refuses a plugin that a base configures (it can't be removed from your file); disable it instead.
+
+> [!warning] Experimental
+> `extends` is experimental: the merge rules may still change.
 
 ## General Configuration
 
@@ -27,13 +64,14 @@ This part of the configuration concerns anything that can affect the whole site.
 - `pageTitleSuffix`: a string added to the end of the page title. This only applies to the browser tab title, not the title shown at the top of the page.
 - `enableSPA`: whether to enable [[SPA Routing]] on your site.
 - `enablePopovers`: whether to enable [[popover previews]] on your site.
+- `prefetch`: fetch pages before their links are followed, so they open at once ([[prefetching]]): `viewport` (default, links on screen and links pointed at), `hover` (only links pointed at) or `"off"`. Works with and without SPA routing.
 - `analytics`: what to use for analytics on your site. Values can be
   - `null`: don't use analytics;
   - `{ provider: 'google', tagId: '<your-google-tag>' }`: use Google Analytics;
   - `{ provider: 'plausible' }` (managed) or `{ provider: 'plausible', host: 'https://<your-plausible-host>' }` (self-hosted, make sure to include the `https://` protocol prefix): use [Plausible](https://plausible.io/);
-  - `{ provider: 'umami', host: '<your-umami-host>', websiteId: '<your-umami-website-id>' }`: use [Umami](https://umami.is/);
+  - `{ provider: 'umami', host: '<your-umami-host>', websiteId: '<your-umami-website-id>', script: '<your-script-name.js>' }`: use [Umami](https://umami.is/);
   - `{ provider: 'goatcounter', websiteId: 'my-goatcounter-id' }` (managed) or `{ provider: 'goatcounter', websiteId: 'my-goatcounter-id', host: 'my-goatcounter-domain.com', scriptSrc: 'https://my-url.to/counter.js' }` (self-hosted) use [GoatCounter](https://goatcounter.com);
-  - `{ provider: 'posthog', apiKey: '<your-posthog-project-apiKey>', host: '<your-posthog-host>' }`: use [Posthog](https://posthog.com/);
+  - `{ provider: 'posthog', apiKey: '<your-posthog-project-apiKey>' }` (managed) or `{ provider: 'posthog', apiKey: '<your-posthog-project-apiKey>', apiHost: '<your-posthog-api-host>', uiHost: '<your-posthog-ui-host>', personProfiles: 'identified_only' }` (self-hosted/reverse proxy): use [PostHog](https://posthog.com/). `uiHost` is required when `apiHost` is a reverse proxy. The legacy `host` option is an alias for `apiHost`;
   - `{ provider: 'tinylytics', siteId: '<your-site-id>' }`: use [Tinylytics](https://tinylytics.app/);
   - `{ provider: 'cabin' }` or `{ provider: 'cabin', host: 'https://cabin.example.com' }` (custom domain): use [Cabin](https://withcabin.com);
   - `{provider: 'clarity', projectId: '<your-clarity-id-code' }`: use [Microsoft clarity](https://clarity.microsoft.com/). The project id can be found on top of the overview page.
@@ -45,18 +83,37 @@ This part of the configuration concerns anything that can affect the whole site.
   - You will be prompted to set this during [[create|`npx quartz create`]]. The CLI automatically strips any `https://` or `http://` protocol prefixes and trailing slashes for you.
   - This should also include the subpath if you are [[hosting]] on GitHub pages without a custom domain. For example, if my repository is `jackyzha0/quartz`, GitHub pages would deploy to `https://jackyzha0.github.io/quartz` and the `baseUrl` would be `jackyzha0.github.io/quartz`.
   - Note that Quartz 5 will avoid using this as much as possible and use relative URLs whenever it can to make sure your site works no matter _where_ you end up actually deploying it.
+- `publishAssets`: which non-Markdown files (images, PDFs, …) from `content` are copied to the site.
+  - `"all"` (default): every file that isn't ignored.
+  - `"referenced"`: only files a published page links to or embeds. Use this with [[ExplicitPublish]] or [[private pages|drafts]], so that files only unpublished notes use stay private.
+  - Files that Quartz renders as pages themselves (e.g. `.base` and `.canvas` files) are never copied as raw assets.
+- `slugs`: how file paths become URLs.
+  - `stripDiacritics`: `true` strips accents and other diacritics from page, folder and file URLs, e.g. `české/čeština.md` is published at `/ceske/cestina` instead of `/české/čeština` (which browsers show as `%C4%8Desk%C3%A9/...` when copied). Off by default.
+    - Links keep working as written in your notes: `[[čeština]]`, `[[české/čeština#Nadpis]]` and embeds like `![[obrázek.png]]` resolve to the stripped addresses. Aliases and `permalink`s are stripped the same way. Heading anchors (`#Nadpis`) keep their diacritics. Tag pages and the pages plugins generate from files (canvas, bases, …) are stripped too with `@quartz-community/utils` 1.3 or newer; with older versions they keep their diacritics.
+    - Only Latin letters change: they lose their accents (`á č é ů …`), and Latin letters without a decomposition fold to ASCII (`ł` → `l`, `ø` → `o`, `ß` → `ss`, `æ` → `ae`). Other scripts (Chinese, Japanese, Korean, Greek, Cyrillic, Arabic, Hebrew, Devanagari, …) are left as written, marks included.
+    - Turning it on changes the URLs of existing pages. Quartz writes a redirect from each page's, folder's and alias's old address (the slug with its diacritics) to the new one, so links shared elsewhere keep working. Old `permalink` addresses are not redirected; add them as `aliases` if they need to keep working.
 - `ignorePatterns`: a list of [glob](<https://en.wikipedia.org/wiki/Glob_(programming)>) patterns that Quartz should ignore and not search through when looking for files inside the `content` folder. See [[private pages]] for more details.
 - `theme`: configure how the site looks.
   - `fontOrigin`: where to load fonts from.
     - `"googleFonts"` (default): loads fonts from Google Fonts API. Fastest option, especially with CDN caching enabled.
-    - `"local"`: downloads fonts and serves them from your site. Fully self-contained with no external requests.
+    - `"local"`: Quartz loads no fonts at all; you provide them. The `typography` names are still used as the font families, so declare matching `@font-face` rules in `quartz/styles/custom.scss` and put the font files in `quartz/static/fonts/` (served at `static/fonts/`):
+
+      ```scss title="quartz/styles/custom.scss"
+      @font-face {
+        font-family: "Inter";
+        src: url("static/fonts/Inter.woff2") format("woff2");
+        font-display: swap;
+      }
+      ```
+
+      Use a path relative to the site root like above (no leading `/`) so it also works when the site is served from a subpath. To have Quartz download Google Fonts at build time and serve them from your site instead, set `configuration.fonts.fontOrigin: selfHosted` (see [[plugins/Fonts|Fonts]]).
   - `cdnCaching`: if `true` (default), use Google CDN to cache the fonts. This will generally be faster. Disable (`false`) this if you want Quartz to download the fonts to be self-contained.
   - `typography`: what fonts to use. Any font available on [Google Fonts](https://fonts.google.com/) works here.
     - `title`: font for the title of the site (optional, same as `header` by default)
     - `header`: font to use for headers
     - `code`: font for inline and block quotes
     - `body`: font for everything
-  - `colors`: controls the theming of the site.
+  - `colors`: controls the theming of the site. It has two color schemes, `lightMode` and `darkMode`, each with the same keys:
     - `light`: page background
     - `lightgray`: borders
     - `gray`: graph links, heavier borders
@@ -66,6 +123,34 @@ This part of the configuration concerns anything that can affect the whole site.
     - `tertiary`: hover states and visited [[graph view|graph]] nodes
     - `highlight`: internal link background, highlighted text, [[syntax highlighting|highlighted lines of code]]
     - `textHighlight`: markdown highlighted text background
+- `frontmatter`, `links`, `drafts`, `contentIndex`: options for Quartz's [[built-in processing]] — frontmatter parsing ([[Frontmatter]]), link resolution ([[CrawlLinks]]), draft handling ([[RemoveDrafts]]) and the content index, sitemap and RSS feed ([[ContentIndex]]). They are on by default. Each takes an object of options (plus `enabled` and `order`) or a boolean shorthand: set e.g. `links: { markdownLinkResolution: relative }` to change an option or `contentIndex: false` to turn one off.
+  - `links.markdownLinkResolution` defaults to `shortest` (Obsidian's default). An old `crawl-links` plugin entry that Quartz migrates keeps that plugin's default, `absolute`, unless it sets another value.
+
+```yaml title="quartz.config.yaml"
+configuration:
+  theme:
+    colors:
+      lightMode:
+        light: "#faf8f8"
+        secondary: "#284b63"
+        # ... the other keys
+      darkMode:
+        light: "#161618"
+        secondary: "#7b97aa"
+        # ... the other keys
+```
+
+> [!note] Colors with an Obsidian theme
+> A theme from [quartz-themes](https://github.com/saberzero1/quartz-themes) (the [[ThemesCore|@quartz-themes/core]] plugin; the Obsidian and TTRPG [[create#Templates|templates]] enable one) brings its own color scheme and colors the page through Obsidian's CSS variables (`--text-normal` for most text, `--text-muted` for paragraphs, `--background-primary`, `--interactive-accent`, …). The `colors` above then have little or no effect. To change a theme's colors, override its variables in `quartz/styles/custom.scss`:
+>
+> ```scss title="quartz/styles/custom.scss"
+> html[saved-theme="dark"] body {
+>   --text-normal: #e0e0e0;
+>   --text-muted: #a0a0a0;
+> }
+> ```
+>
+> (use `html[saved-theme="light"] body` for light mode), or disable the theme to use the `colors` above.
 
 ## Plugins
 
@@ -75,16 +160,30 @@ You can think of Quartz plugins as a series of transformations over content.
 
 ```yaml title="quartz.config.yaml"
 plugins:
-  - source: github:quartz-community/created-modified-date
+  - source: "@quartz-community/created-modified-date"
     enabled: true
     order: 10 # controls execution order
-  - source: github:quartz-community/syntax-highlighting
+  - source: "@quartz-community/syntax-highlighting"
     enabled: true
     order: 20
   # ... more plugins
 ```
 
 Plugins are categorized by their type (transformer, filter, emitter, pageType) based on their manifest. The `order` field controls execution order within each category.
+
+`before` and `after` name plugins that this one must run before or after (one name or a list; `obsidian-flavored-markdown`, `ObsidianFlavoredMarkdown` and `@quartz-community/obsidian-flavored-markdown` all work, as do the built-ins `frontmatter`, `links`, `drafts` and `contentIndex`; the names of the plugins they replaced, `crawl-links`, `remove-draft` and `content-index`, mean those built-ins). They never override `order`; they are checked against it:
+
+```yaml title="quartz.config.yaml"
+plugins:
+  - source: github:me/my-transformer
+    enabled: true
+    order: 45
+    after: obsidian-flavored-markdown # needs the links OFM creates
+```
+
+- Between plugins with the same `order`, `before`/`after` decide the order (otherwise the list order does).
+- If `order` contradicts a constraint (here: OFM moved to order 50), the build stops with an error that names both orders, instead of silently running the plugins the wrong way round.
+- A name that isn't in your config is an error. A plugin that is disabled, or runs in another category (a filter named by a transformer), is skipped: the constraint applies only where both plugins run.
 
 > [!note]
 > For advanced TS override of plugin configuration, you can modify `quartz.ts`:
@@ -100,7 +199,7 @@ Plugins are categorized by their type (transformer, filter, emitter, pageType) b
 > ```
 
 - [[tags/plugin/transformer|Transformers]] **map** over content (e.g. parsing frontmatter, generating a description)
-- [[tags/plugin/filter|Filters]] **filter** content (e.g. filtering out drafts)
+- [[tags/plugin/filter|Filters]] **filter** content (e.g. hiding [[UnlistedPages|unlisted pages]]; dropping drafts is [[built-in processing|built in]])
 - [[tags/plugin/emitter|Emitters]] **reduce** over content (e.g. creating an RSS feed or pages that list all files with a specific tag)
 - **Page Types** define how different types of pages are rendered (content pages, folder listings, tag listings). Each page type can use a different [[layout#Page Frames|page frame]] to control its overall HTML structure.
 
@@ -117,15 +216,15 @@ See [[layout#Page Frames]] for details on available frames and how frame resolut
 
 ### Internal vs External Plugins
 
-Quartz distinguishes between internal plugins that are bundled with Quartz and community plugins that are installed separately.
+Quartz distinguishes between processing that is built into Quartz and plugins that are installed separately.
 
-In `quartz.config.yaml`, community plugins are referenced by their GitHub source:
+In `quartz.config.yaml`, the official plugins are referenced by their npm package name (this is what the default config uses); other plugins can also be referenced by a Git source such as `github:org/repo`:
 
 ```yaml title="quartz.config.yaml"
 plugins:
-  - source: github:quartz-community/explorer
+  - source: "@quartz-community/explorer"
     enabled: true
-  - source: github:quartz-community/syntax-highlighting
+  - source: "@quartz-community/syntax-highlighting"
     enabled: true
     options:
       theme:
@@ -133,14 +232,15 @@ plugins:
         dark: github-dark
 ```
 
-Internal plugins (like `FrontMatter`) are bundled with Quartz. Community plugins are installed separately and referenced by their `github:org/repo` source.
+Frontmatter parsing, link resolution, drafts and the content index are not plugins: they are [[built-in processing|built into Quartz]] and configured under `configuration.frontmatter`, `.links`, `.drafts` and `.contentIndex`. Everything else is a plugin, referenced by its source: npm plugins (all the default ones) are installed in `node_modules`, Git and local plugins in `.quartz/plugins/`.
 
 ### Community Plugins
 
 To install a community plugin, you can use the following command:
 
 ```shell
-npx quartz plugin add github:quartz-community/explorer
+npx quartz plugin add @quartz-community/explorer   # an npm package
+npx quartz plugin add github:username/repo         # a Git repository
 ```
 
 This adds the plugin to `quartz.config.yaml` and installs it to `.quartz/plugins/`.
@@ -165,7 +265,9 @@ The `source` field for a plugin can be either a simple string or an object with 
 
 ```yaml title="quartz.config.yaml"
 plugins:
-  - source: github:quartz-community/explorer
+  - source: "@quartz-community/explorer"
+    enabled: true
+  - source: github:username/repo
     enabled: true
 ```
 
@@ -190,18 +292,27 @@ The object form supports the following fields:
 | `ref`    |    ❌    | Git ref (branch or tag) to pin to. Equivalent to the `#ref` suffix on string sources.                     |
 | `name`   |    ❌    | Override the directory name used in `.quartz/plugins/`. Defaults to the repository name.                  |
 
-> [!example] Real-world example
-> The [quartz-themes](https://github.com/saberzero1/quartz-themes) plugin lives in the `plugin/` subdirectory of its repository. To install it:
+> [!example] Example
+> A plugin in the `plugin/` subdirectory of a repository, pinned to a tag:
 >
 > ```yaml title="quartz.config.yaml"
 > plugins:
 >   - source:
->       name: quartz-themes
->       repo: "https://github.com/saberzero1/quartz-themes.git"
+>       name: my-plugin
+>       repo: "https://github.com/user/repo.git"
 >       subdir: plugin
+>       ref: v1.0.0
+>     enabled: true
+> ```
+>
+> Themes from [quartz-themes](https://github.com/saberzero1/quartz-themes) don't need this: they are published to npm as `@quartz-themes/core` and the default config already has a (disabled) entry for it:
+>
+> ```yaml title="quartz.config.yaml"
+> plugins:
+>   - source: "@quartz-themes/core"
 >     enabled: true
 >     options:
->       theme: "tokyo-night"
+>       theme: tokyo-night
 >       mode: both
 > ```
 
@@ -214,7 +325,7 @@ You can customize the behaviour of Quartz by adding, removing and reordering plu
 
 ```yaml title="quartz.config.yaml"
 plugins:
-  - source: github:quartz-community/note-properties
+  - source: "@quartz-community/note-properties"
     enabled: true
     options:
       includeAll: false
@@ -223,7 +334,7 @@ plugins:
         - tags
         - aliases
     order: 5
-  - source: github:quartz-community/created-modified-date
+  - source: "@quartz-community/created-modified-date"
     enabled: true
     options:
       priority:
@@ -231,7 +342,7 @@ plugins:
         - git
         - filesystem
     order: 10
-  - source: github:quartz-community/latex
+  - source: "@quartz-community/latex"
     enabled: true
     options:
       renderEngine: katex
@@ -277,6 +388,9 @@ configuration:
       code: IBM Plex Mono
 ```
 
+> [!note]
+> Quartz uses `title`, but the config's JSON schema doesn't list it yet, so an editor with YAML validation may flag it. The warning can be ignored.
+
 For more control over font weights and italics, use the TS override in `quartz.ts`:
 
 ```ts title="quartz.ts"
@@ -300,4 +414,4 @@ export const layout = await loadQuartzLayout()
 ```
 
 > [!tip]
-> For per-heading font control, self-hosted fonts, or Obsidian theme font bridging, see the [[plugins/Fonts|Fonts]] plugin. It can download Google Fonts at build time and serve them locally with `fontOrigin: selfHosted`, making your site fully self-contained.
+> For per-heading fonts and self-hosted fonts, see [[plugins/Fonts|Fonts]] (`configuration.fonts`). With `fontOrigin: selfHosted`, Quartz downloads Google Fonts at build time and serves them from your site, making it fully self-contained.

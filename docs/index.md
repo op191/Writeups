@@ -6,7 +6,7 @@ Quartz is a fast, batteries-included static-site generator that transforms Markd
 
 ## 🪴 Get Started
 
-Quartz requires **at least [Node](https://nodejs.org/) v22** and `npm` v10.9.2 to function correctly. Ensure you have these installed on your machine before continuing. See the [[getting-started/index#Prerequisites|prerequisites]] for help installing them.
+Quartz requires **at least [Node](https://nodejs.org/) v22.22** and `npm` v10.9.2 to function correctly. Ensure you have these installed on your machine before continuing. See the [[getting-started/index#Prerequisites|prerequisites]] for help installing them.
 
 > [!tip] GitHub users
 > You can also use the **[GitHub template](https://github.com/jackyzha0/quartz/generate)** to create your repository in one click, then clone that instead. See [[installation#Option A Use the GitHub Template Recommended|Option A]] in the installation guide.
@@ -20,12 +20,10 @@ cd quartz
 npm i
 
 # 3. Initialize your site (choose a template, set your base URL, import content)
+#    This also installs the plugins your template uses
 npx quartz create
 
-# 4. Install plugins referenced by your chosen template
-npx quartz plugin install --from-config
-
-# 5. Preview your site locally
+# 4. Preview your site locally
 npx quartz build --serve
 ```
 
@@ -66,4 +64,4 @@ For a comprehensive list of features, visit the [features page](./features/). Yo
 
 Having trouble with Quartz? Try searching for your issue using the search feature or check the [[troubleshooting]] page. If you haven't already, [[upgrading|upgrade]] to the newest version of Quartz to see if this fixes your issue.
 
-If you're still having trouble, feel free to [submit an issue](https://github.com/jackyzha0/quartz/issues) if you feel you found a bug or ask for help in our [Discord Community](https://discord.gg/cRFFHYye7t). You can also browse the [[community]] page for third-party plugins and resources.
+If you're still having trouble, feel free to [submit an issue](https://github.com/jackyzha0/quartz/issues) if you feel you found a bug (include the output of `npx quartz info`) or ask for help in our [Discord Community](https://discord.gg/cRFFHYye7t). You can also browse the [[community]] page for third-party plugins and resources.

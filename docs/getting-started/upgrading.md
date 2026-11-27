@@ -13,7 +13,7 @@ To fetch the latest Quartz updates, simply run
 npx quartz upgrade
 ```
 
-As Quartz uses [git](https://git-scm.com/) under the hood for versioning, upgrading effectively 'pulls' in the updates from the official Quartz GitHub repository. Merge conflicts in `quartz.lock.json` are handled automatically — Quartz backs up your lockfile before pulling and restores it afterward. For other files with local changes that conflict with the updates, you may need to resolve these manually yourself (or, pull manually using `git pull origin upstream`).
+As Quartz uses [git](https://git-scm.com/) under the hood for versioning, upgrading effectively 'pulls' in the updates from the official Quartz GitHub repository. Merge conflicts in `quartz.lock.json` are handled automatically — Quartz backs up your lockfile before pulling and restores it afterward. For other files with local changes that conflict with the updates, you may need to resolve these manually yourself (or pull manually with `git pull upstream v5`).
 
 > [!hint]
 > Quartz will try to cache your content before upgrading to try and prevent merge conflicts. If you get a conflict mid-merge, you can stop the merge and then run `npx quartz restore` to restore your content from the cache.
@@ -27,6 +27,98 @@ npx quartz plugin install --latest
 ```
 
 See the [[upgrade|CLI reference for upgrade]] for more details on available flags.
+
+## Upgrading from 5.2 to 5.3
+
+Quartz 5.3 needs **Node.js 22.22 or later**. Then upgrade as usual:
+
+```bash
+npx quartz upgrade
+npx quartz plugin install --latest
+```
+
+### Changes you may notice
+
+- **Block anchors**: a block's id is now `^id` and links to it are `#^id` (`[[note#^para-1]]` → `note#^para-1`, was `note#para-1`), as in Obsidian, where blocks and headings are separate namespaces: block `^para-1` and heading `## Para 1` no longer share an id, so `[[#^para-1]]` and `[[#Para 1]]` each land on their own target. Links inside the site are regenerated; old `#id` URLs of blocks from outside the site now go to the top of the page (or to a heading of that name). CSS or scripts that select a block by id need `#\^para-1` (or `getElementById`).
+- **Unresolved links**: `configuration.links.disableBrokenWikilinks` is now on by default. Links to pages that don't exist get the `broken` class and are styled as unresolved, as in Obsidian. Links to pages a filter removes (drafts, unpublished notes) are marked the same way, with `data-filtered="<filter>"`. Set `links.disableBrokenWikilinks: false` to style them as before.
+- **Mermaid diagrams** render with [Pele](https://pele.run) by default, as in Obsidian, inside a `<div class="mermaid">` rather than a code block. Set `diagramRenderer: mermaid` on [[ObsidianFlavoredMarkdown]] to keep Mermaid.js. See [[Mermaid diagrams]].
+- **Block wrappers**: each top-level block of a note is wrapped in the `div` Obsidian puts it in (`div.el-p > p`, `div.el-h2 > h2`). Custom CSS that selects a page's blocks as direct children (`article > p`) no longer matches. Select them without `>`, or set `blockWrappers: false` on ObsidianFlavoredMarkdown.
+- **Transclusions** use Obsidian's embed markup: the title of a whole-note embed is a `div.markdown-embed-title` (it was an `h1`), and the content is in `div.markdown-embed-content`. It looks the same without a theme. Custom CSS for transclusions may need new selectors.
+- **Page structure**: the centre column is a `<main>` (it was a `div`; the `center` class is unchanged) and the default frame's sidebars are `<aside>` elements. Page listings use `h2` titles (they were `h3`) at the same size. Footnote links keep the `internal` class but no longer have `internal-link`.
+- **Colours**: the templates' `gray` and `tertiary` colours meet WCAG AA contrast. Your site keeps the colours in its own `quartz.config.yaml`. To adopt the new ones, set them under `configuration.theme.colors`:
+
+  ```yaml title="quartz.config.yaml"
+  configuration:
+    theme:
+      colors:
+        lightMode:
+          gray: "#727272" # was #b8b8b8
+          tertiary: "#587971" # was #84a59d
+        darkMode:
+          gray: "#7f7f7f" # was #646464
+  ```
+
+- **Folding**: the `obsidian` template folds headings and lists. Other sites can turn it on with `foldHeadings` and `foldLists` on ObsidianFlavoredMarkdown.
+- **Stylesheets**: component styles are one `component-<hash>.css` file instead of one per component. The styles are unchanged.
+- **Frontmatter** is read as YAML 1.2. Frontmatter with only comments has no properties, as in Obsidian, instead of being reported as invalid.
+- **Custom TypeScript**: type checking (`npm run check`) uses TypeScript 7 with `moduleResolution: bundler`. Code that imports a package's internal files may need to import from the package itself.
+
+### New options
+
+- `extends` (experimental) and `before`/`after` on plugin entries. See [[configuration#Extending the default configuration]].
+- `configuration.slugs.stripDiacritics`. See [[configuration#General Configuration]].
+- The layout conditions `is-index`, `is-folder-index` and `not-<condition>`. See [[layout#Conditional Rendering]].
+- [[plugins/Explorer|Explorer]]: `sort`, `rootFolder`, and `order` in YAML. [[GitHubFlavoredMarkdown]]: `singleTilde`, `replacements`. [[ObsidianFlavoredMarkdown]]: `math`, `markdownEmbeds`, `blockWrappers`, `foldHeadings`, `foldLists`. [[CanvasPage]]: `wheelBehavior`, `textNodeMarkdown`.
+
+See [[whats-new#New in 5.3|What's new in 5.3]] for everything else.
+
+## Upgrading from 5.1 to 5.2
+
+```bash
+npx quartz upgrade
+npx quartz plugin doctor --fix
+```
+
+`--fix` moves the Fonts plugin's entry (`@quartz-community/quartz-fonts`) into `configuration.fonts`, now that font loading is built in. Until you run it, the entry keeps working and is applied automatically.
+
+### Changes you may notice
+
+- **Themes**: [[ThemesCore]] 3 converts Obsidian themes at build time, so the `@quartz-themes/<theme>` packages are no longer needed. Theme ids from 2.x (`tokyo-night`) keep working. The `aspects`, `include`, `calloutStyle` and `fonts` options were removed.
+- **Callouts and transclusions** render as `<div>` elements, as in Obsidian (callouts were `<blockquote>`). Callout titles are in `.callout-title-inner` without a `<p>`. Custom CSS for either may need new selectors.
+- **Bases** columns are labelled with the property's name (`priority`, `file name`) instead of title case (`Priority`, `Name`). Set `propertyLabels: title` on [[BasesPage]] for the old labels.
+- **Permalinks** with `.` or `..` segments are ignored with a warning.
+- **Fonts**: configured `body`, `code` and `interface` fonts now apply under an Obsidian theme, and the interface and heading fonts are loaded from Google Fonts like the others.
+
+See [[whats-new#New in 5.2|What's new in 5.2]] for everything else.
+
+## Upgrading from 5.0 to 5.1
+
+Run the upgrade, then let `plugin doctor` update your config:
+
+```bash
+npx quartz upgrade
+npx quartz plugin doctor --fix
+```
+
+`upgrade` shows the release notes since your version and runs `plugin doctor` for you. `--fix` moves the entries of plugins that are now [[built-in processing|built into Quartz]] (`crawl-links`, `remove-draft`, `content-index`, and note-properties' `delimiters`/`language` options) into `configuration.links`, `drafts`, `contentIndex` and `frontmatter`, and removes their unused pins from `quartz.lock.json`. Until you run it, those entries keep working and are applied automatically.
+
+### Changes you may notice
+
+- **Line breaks**: a single line break inside a paragraph now renders as `<br>`, as in Obsidian's reading view ([[ObsidianFlavoredMarkdown]] 2.0). Set `strictLineBreaks: true` in its options to keep the old behaviour (a space). The [[HardLineBreaks]] plugin is deprecated and no longer in the default config; Quartz warns while it is enabled.
+- **Plugin order**: [[GitHubFlavoredMarkdown]] now runs before ObsidianFlavoredMarkdown (`order` 30, then 40). If your config sets `order` for either, keep GitHubFlavoredMarkdown first. Strikethrough (`~~`) now follows Obsidian's rules.
+- **Heading ids**: a heading containing `--` gets the same id as on GitHub (`## Range 1--2` → `#range-1--2`, was `#range-12`). Links that hard-code an old id need updating; `[[page#Range 1--2]]` keeps working.
+- **Bases** behave as in Obsidian 1.15 ([[BasesPage]] 1.2): `file.name` of a Markdown note has no extension (`Note`; `file.fullname` has it), `file.tags` keeps `#` and the original case, nested tags match (`#project` finds `#project/x`), the cards' `imageAspectRatio` is height/width (it was inverted), a base opens on its first view, and subtracting dates gives a duration (`(due - today()).days`).
+- **Permalinks** are now the page's address: `permalink: page` publishes the note at `/page`, and its file path redirects there. Before, the permalink only redirected to the file path. See [[authoring-content|frontmatter fields]].
+- **Frontmatter**: `---js` / `---javascript` frontmatter is refused, and invalid frontmatter (e.g. broken YAML) stops the build with an error naming the file.
+- **Plugins in CI**: builds with `CI` set (GitHub Actions, Cloudflare Pages, Netlify, Vercel, …) fail on plugins that fail to load or need a newer Quartz. Set `QUARTZ_ALLOW_BROKEN_PLUGINS=1` or `QUARTZ_ALLOW_INCOMPATIBLE_PLUGINS=1` to deploy anyway. See [[troubleshooting#Reading build output]].
+
+### New options
+
+- `configuration.prefetch` (default `viewport`): pages are fetched before their links are followed. See [[prefetching]].
+- `configuration.publishAssets: referenced` copies only the files published pages use, so files used only by unpublished notes stay private (default `all`).
+- `layout.sidebars`: how sidebars taller than the screen behave (`fit`, `scroll`, `static`). See [[layout#Sidebar modes]].
+
+See [[whats-new#New in 5.1|What's new in 5.1]] for everything else.
 
 ### Layout System Changes
 
@@ -104,17 +196,7 @@ plugins:
 > [!important]
 > The `@` scoped name must be quoted in YAML. Use double quotes around the source value.
 
-Then install the packages:
-
-```bash
-npm install @quartz-community/syntax-highlighting
-```
-
-Or install all default plugins at once:
-
-```bash
-npm install @quartz-community/created-modified-date @quartz-community/syntax-highlighting @quartz-community/obsidian-flavored-markdown @quartz-community/github-flavored-markdown @quartz-community/table-of-contents @quartz-community/crawl-links @quartz-community/description @quartz-community/latex @quartz-community/quartz-fonts @quartz-community/remove-draft @quartz-community/alias-redirects @quartz-community/content-index @quartz-community/favicon @quartz-community/og-image @quartz-community/cname @quartz-community/canvas-page @quartz-community/content-page @quartz-community/folder-page @quartz-community/tag-page @quartz-community/explorer @quartz-community/graph @quartz-community/search @quartz-community/backlinks @quartz-community/article-title @quartz-community/content-meta @quartz-community/page-title @quartz-community/darkmode @quartz-community/reader-mode @quartz-community/breadcrumbs @quartz-community/footer @quartz-community/spacer @quartz-community/bases-page @quartz-community/note-properties @quartz-community/unlisted-pages @quartz-community/encrypted-pages
-```
+The default plugins are already dependencies in Quartz's `package.json`, so `npm i` installs them — no separate install step is needed. For other npm plugins, use `npx quartz plugin add "@scope/plugin-name"`, which installs the package and adds the entry for you.
 
 ### Do I Have to Switch?
 
