@@ -1,0 +1,8 @@
+# 个人配置：只写与 quartz.config.default.yaml 不同的部分。
+# extends: default 表示以 quartz.config.default.yaml 为基础，仅覆盖下面列出的项。
+# 这样以后 `git merge upstream/v5` 更新 app 时，不会产生配置冲突。
+extends: default
+
+configuration:
+  pageTitle: pp's Security Notes
+  baseUrl: op191.github.io/Writeups
